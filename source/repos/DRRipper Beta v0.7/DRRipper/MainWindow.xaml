@@ -1,0 +1,61 @@
+﻿<Window x:Class="DRRipper.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DRRipper" Height="400" Width="800" MinWidth="650" MinHeight="380"
+        Background="#1E1E1E">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" /> <!-- URL label -->
+            <RowDefinition Height="*" MinHeight="80" /> <!-- URL textbox (fills available, min 80) -->
+            <RowDefinition Height="Auto" /> <!-- Save directory -->
+            <RowDefinition Height="Auto" /> <!-- Buttons -->
+            <RowDefinition Height="Auto" /> <!-- ProgressBar -->
+            <RowDefinition Height="Auto" />    <!-- Info grid (auto height) -->
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="URL:" Foreground="LightGray" Grid.Row="0" />
+        <TextBox x:Name="UrlTextBox" Grid.Row="1" Margin="0,6,0,0" MinHeight="80" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Foreground="White" Background="#2D2D30" BorderBrush="#3C3C3C" />
+
+        <!-- Save directory selector -->
+        <Grid Grid.Row="2" Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Save To:" Foreground="LightGray" VerticalAlignment="Center" />
+            <TextBox x:Name="PathTextBox" Grid.Column="1" Margin="8,0,8,0" Height="28" Foreground="White" Background="#2D2D30" BorderBrush="#3C3C3C" />
+            <Button x:Name="BrowseButton" Grid.Column="2" Content="Browse..." Height="28" Width="84" Click="BrowseButton_Click" />
+        </Grid>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,12,0,0" HorizontalAlignment="Left">
+            <Button x:Name="StartButton" Content="Start Download" Height="32" Width="140" Click="StartButton_Click" />
+            <Button x:Name="CancelButton" Content="Cancel" Height="32" Width="84" Margin="8,0,0,0" Click="CancelButton_Click" />
+        </StackPanel>
+
+        <ProgressBar x:Name="OverallProgressBar" Grid.Row="4" Height="18" Margin="0,12,0,0" Minimum="0" Maximum="100" />
+
+        <Grid Grid.Row="5" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,24,0">
+                <TextBlock Text="Speed:" Foreground="LightGray" VerticalAlignment="Center" />
+                <TextBlock x:Name="SpeedLabel" Text="0 MB/s" Foreground="White" Margin="6,0,0,0" />
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,24,0">
+                <TextBlock Text="Downloaded:" Foreground="LightGray" VerticalAlignment="Center" />
+                <TextBlock x:Name="BytesLabel" Text="0 / 0" Foreground="White" Margin="6,0,0,0" />
+            </StackPanel>
+
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <TextBlock Text="State:" Foreground="LightGray" VerticalAlignment="Center" />
+                <TextBlock x:Name="StateLabel" Text="Idle" Foreground="White" Margin="6,0,0,0" TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

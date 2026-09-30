@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net10.0-windows</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<UseWPF>true</UseWPF>
+		<UseWindowsForms>true</UseWindowsForms>
+
+		<!-- Icon -->
+		<ApplicationIcon>AimJax.ico</ApplicationIcon>
+
+		<!-- Windows "File description" reads Title & AssemblyTitle -->
+		<Title>DRRipper — The Ultimate High-Speed File Ripper</Title>
+		<AssemblyTitle>DRRipper — The Ultimate High-Speed File Ripper</AssemblyTitle>
+		<Description>DRRipper — The Ultimate High-Speed File Ripper</Description>
+
+		<!-- Versioning & Metadata -->
+		<Version>0.4.0</Version>
+		<ProductVersion>0.4.0</ProductVersion>
+		<FileVersion>0.4.0.0</FileVersion>
+		<AssemblyVersion>0.4.0.0</AssemblyVersion>
+
+		<!-- Branding -->
+		<Company>AimJax</Company>
+		<Authors>AimJax</Authors>
+		<Copyright>AimJax</Copyright>
+		<Product>DRRipper</Product>
+	</PropertyGroup>
+
+</Project>
