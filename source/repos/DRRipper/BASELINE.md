@@ -75,3 +75,57 @@ Harness: `DRRipper.Benchmarks` (`dotnet run --project DRRipper.Benchmarks -c Rel
 - Software: SDK 10.0.401, runtime 10.0.12, xUnit 2.9.3, Test SDK 17.14.1, Kestrel (ASP.NET Core 10).
 - Limitations: no internet-path measurements; server and downloader share one process (CPU/WS include harness); T-UNIT-01 is black-box because chunk math is inline and production accessibility was deliberately not changed (Ticket #002 §8); per-test timeouts bound, but do not eliminate, the engine's infinite-retry hangs (T-INT-04 uses a 35 s bound); benchmark `finalization` is approximated as return-time minus last-progress-time.
 - Machine-specific paths, credentials, and raw result artifacts are excluded from the repo (see `.gitignore`).
+
+---
+
+# Ticket #003 appendix (2026-09-30, same hardware)
+
+Production engine modified (strict validation, completion gate, fault propagation,
+unified cancellation, bounded retry). Test server rewritten to bounded-memory
+streaming. Ticket #002 data above is preserved as the pre-fix record.
+
+## Build
+
+- `dotnet build DRRipper.slnx -c Release --no-incremental`: **0 errors**,
+  **1 pre-existing warning** (CS0168, untouched DNS catch — same as Ticket #002).
+
+## Tests: 30 passing, 2 known-failing, 0 unexpected
+
+- New/migrated integrity tests all green: A (T-INT-03 resume-to-identical),
+  B, C, D, E (T-INT-05 fail-fast), F, G (T-INT-04 bounded throw), H
+  (Retry-After honoured), I/J/K (cancellation family + `Cancelled`, never
+  `Completed`), L (reason-preserving session abort), M (RangeTracker unit),
+  N (classifier + locked-file), O, P/Q (unchanged fallbacks), mid-run
+  identity-switch rejection.
+- Known failures carried over unchanged: T-REC-01/05 (persistent cross-process
+  recovery — explicitly the next ticket; retransmission ratios 1.23/1.45 re-observed).
+
+## Benchmarks (fresh comparable baseline)
+
+Same matrix (10/100/1024 MB × 1/2/4/8/16 conns × 3 iters), all 45 runs
+SHA-256 OK, 0 retransmits, finalization ≈ 0 ms, handle deltas ≈ 0.
+Median MB/s:
+
+| Size | conn=1 | conn=2 | conn=4 | conn=8 | conn=16 |
+|---|---|---|---|---|---|
+| 10 MB | 259.9 | 251.5 | 294.2 | 304.1 | 284.8 |
+| 100 MB | 392.4 | 543.1 | 457.2 | 344.6 | 402.1 |
+| 1024 MB | 420.9 | 583.9 | 508.1 | 451.6 | 433.8 |
+
+CPU ≈ 17 s per 1 GB run (was ≈ 22 s); peak working set ≈ 74 MB on every
+configuration (was 2 172 MB on 1 GB runs).
+
+## Regression analysis
+
+Throughput is roughly 2× the Ticket #002 medians (e.g. 1 GB conn=2:
+252.8 → 583.9 MB/s) with the same optimum shape (2 connections best;
+4–16 flat or slower — the audit thesis holds). Per the ticket's methodology
+rule this is reported as a **fresh baseline, not a claimed engine speedup**:
+the test-server rewrite (full-body materialization → 64 KB streaming,
+2 GB of transient arrays removed) eliminates the dominant same-host
+bottleneck, so most of the delta is harness effect. Plausible genuine engine
+contributors — identity encoding (no decompression path), one timer instead
+of two linked CTS allocations per read, cheaper completion accounting — were
+not isolated and are not claimed. No benchmark regressed: every cell is
+faster-or-equal, all integrity checks pass, so correctness was not traded
+for speed. The >5% rule will apply to future changes against THIS table.

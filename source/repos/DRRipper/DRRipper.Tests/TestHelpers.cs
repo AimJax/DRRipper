@@ -65,6 +65,47 @@ public sealed class DownloadFixture : IAsyncDisposable
             $"{context}: SHA-256 mismatch. expected={expectedHex} actual={actual} file={path}");
     }
 
+    /// <summary>
+    /// Cancellation surfaces as OperationCanceledException or a derived type
+    /// (e.g. TaskCanceledException from HttpClient). Assert the family.
+    /// </summary>
+    public static async Task<OperationCanceledException> ThrowsCancelledAsync(
+        Func<Task<string>> download, Xunit.Abstractions.ITestOutputHelper? output = null)
+    {
+        try
+        {
+            string path = await download();
+        }
+        catch (Exception ex) when (ex is OperationCanceledException oce)
+        {
+            output?.WriteLine($"OBSERVATION: StartAsync threw {ex.GetType().Name} (cancellation family).");
+            return oce;
+        }
+        Assert.Fail("Expected StartAsync to throw OperationCanceledException, but it returned successfully.");
+        throw new InvalidOperationException("unreachable");
+    }
+
+    /// <summary>
+    /// xUnit's ThrowsAsync demands an exact type; the engine throws
+    /// DownloadFailedException subclasses (e.g. NonRetryableHttpException).
+    /// Assert the family, not the exact class, and return the failure.
+    /// </summary>
+    public static async Task<DownloadFailedException> ThrowsDownloadFailedAsync(
+        Func<Task<string>> download, Xunit.Abstractions.ITestOutputHelper? output = null)
+    {
+        try
+        {
+            string path = await download();
+        }
+        catch (Exception ex) when (ex is DownloadFailedException dfe)
+        {
+            output?.WriteLine($"OBSERVATION: StartAsync threw {ex.GetType().Name}: {ex.Message}");
+            return dfe;
+        }
+        Assert.Fail("Expected StartAsync to throw DownloadFailedException, but it returned successfully.");
+        throw new InvalidOperationException("unreachable");
+    }
+
     public async ValueTask DisposeAsync()
     {
         try { await Server.DisposeAsync(); } catch { }

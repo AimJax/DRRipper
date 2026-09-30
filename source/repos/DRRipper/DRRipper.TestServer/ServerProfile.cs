@@ -63,5 +63,18 @@ public sealed class ServerProfile
     /// <summary>Malformed-response probe: lie about the total in Content-Range. Null = truthful.</summary>
     public long? WrongContentRangeTotal { get; set; }
 
+    /// <summary>Verbatim Content-Range for 206 responses (wrong start/end/total probes). Null = computed.</summary>
+    public string? ContentRangeOverride { get; set; }
+
+    /// <summary>Ignore Range headers and always answer 200 with the full body (fallback probe).</summary>
+    public bool Respond200ToRanges { get; set; }
+
+    /// <summary>Retry-After seconds emitted with error statuses (429/503 injection).</summary>
+    public int? RetryAfterSeconds { get; set; }
+
+    /// <summary>After this many /file requests, serve SwitchedETag instead of ETag (same bytes).</summary>
+    public int? IdentitySwitchAfterRequests { get; set; }
+    public string? SwitchedETag { get; set; }
+
     public static ServerProfile Default() => new();
 }

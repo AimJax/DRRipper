@@ -217,4 +217,46 @@ No old code should be restored wholesale; the v0.9 EOF condition should be reins
 
 ---
 
+---
+
+## 11. Ticket #003 — resolution status (2026-09-30, commit pending)
+
+Sections 1–10 above are the frozen Ticket #001 audit and are left intact.
+This section records the new finding discovered during Ticket #002 testing
+and the Ticket #003 disposition of each finding. Production fix: strict
+range validation, exact chunk completion, fault propagation, explicit
+completion gate, unified cancellation, bounded retry (see ARCHITECTURE.md §9).
+
+### F-13 — Parallel-path cancellation swallowed into false Completed (CRITICAL)
+
+1. **Identifier:** F-13 (next in the confirmed-defect sequence).
+2. **Severity:** Critical.
+3. **Affected file:** `DRRipper/ParallelDownloader.cs` (pre-#003 worker completion block).
+4. **Method/location:** `StartAsync` post-`Task.WhenAll` continuation; worker `catch (OperationCanceledException) { break; }` path.
+5. **Explanation:** Cancelling the external `CancellationToken` mid-flight made every worker break out of its loop, after which `Task.WhenAll` completed normally and the code unconditionally executed `SetState(Completed)` and returned the output path. The destination file — preallocated, mostly zeros — was therefore reported as a successful download. The single-stream path instead propagated `OperationCanceledException`, so cancellation semantics were also inconsistent across paths.
+6. **Reproduction:** T-REC-01 observation (Ticket #002): cancelled at 5.3 MB of 24 MB, engine state `Completed`, path returned.
+7. **Correction (Ticket #003):** post-`WhenAll` cancellation check throws `OperationCanceledException` (state `Cancelled`, no path returned); single-stream maps terminal cancellation to `Cancelled` likewise; `Cancel()` + `Dispose()` ordering hardened.
+8. **Regression tests:** IntegrityTests I/J/K (cancel parallel / single-stream / during backoff).
+9. **Impact if unfixed:** every user or app-level cancel of a parallel download silently certifies a corrupt file.
+
+### Disposition table
+
+| Finding | Ticket #003 status | Evidence |
+|---|---|---|
+| F-01 premature chunk acceptance | **Resolved** | T-INT-03 (short clean-EOF body now resumes to byte-identical file) |
+| F-02 swallowed worker failures | **Resolved** | T-INT-04, L (faults propagate as `DownloadFailedException`; `Failed` never becomes `Completed`) |
+| F-03 resume truncation | Unchanged (next ticket) | T-REC-01/05 still KnownFailure |
+| F-04 no identity validators | **Partially addressed**: in-run ETag/Last-Modified consistency enforced; cross-run persistence still next ticket | IdentitySwitch rejection test; T-REC-03 still passes |
+| F-05 batch abort | Unchanged (scheduler ticket) | — |
+| F-06 shared state/Dispose race | **Partially addressed**: CTS disposal + cancel-before-teardown; full session isolation still next ticket | N-locked test; code review |
+| F-07 unbounded connections | Unchanged (tuning ticket) | Benchmarks still peak at 2 conns |
+| F-08 decompression vs ranges | **Mitigated**: `Accept-Encoding: identity` on all range requests; span fallback retained | T-INT-02 passes uncompressed path |
+| F-09 CTS leak | **Resolved** | Previous source disposed before reassignment |
+| F-10 single-stream resume | **Refined + partially addressed**: stale-tail path proven unreachable (callers pre-truncate); bounded retry + length check added; persistence next ticket | T-REC-05 still KnownFailure (retransmission) |
+| F-11 infinite disk-full retry | **Resolved** | Classifier + fail-fast (unit tests N, integration N-locked) |
+| F-12 no completion gate | **Resolved** | RangeTracker + byte + on-disk gate; M unit tests; gate-violation path throws |
+| F-13 (new) cancellation swallow | **Resolved** | IntegrityTests I/J/K |
+| P-01 request-CTS key collision | **Mitigated**: AddOrUpdate always tracks the live request | Code review |
+| P-03 Content-Range ignored | **Resolved** | C/D/E rejection tests |
+
 *End of AUDIT.md — see ROADMAP.md, ARCHITECTURE.md, TEST_PLAN.md.*

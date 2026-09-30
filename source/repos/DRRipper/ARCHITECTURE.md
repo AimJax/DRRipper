@@ -80,4 +80,16 @@ JobScheduler ──▶ DownloadSession × N ──▶ Engine (range workers, sha
 
 Migration order follows ROADMAP.md: integrity (sessions + lifecycle + metadata) → engine tuning → scheduler/concurrency → MVVM UI.
 
+## 9. Post-Ticket #003 architecture deltas (2026-09-30)
+
+Ticket #003 kept the direct-offset, preallocated, chunk-queue architecture and changed the trust model around it. Nothing here introduces segment files, concatenation, a database, or adaptive concurrency.
+
+- **Strict range validation (§4):** every range request carries `Accept-Encoding: identity`; every 206 is checked for status, `Content-Range` presence/unit/span-vs-request/total-vs-session, and ETag/Last-Modified stability captured at probe time. `Content-Length` is never trusted for offsets — expected bytes always equal the requested span. Any 200-to-range triggers a one-time clean fallback (truncate + single-stream); 416 and mismatches fail fast.
+- **Exact chunk completion (§5):** `DownloadChunkStrictAsync` succeeds only when all requested bytes are written. Clean-EOF shortfalls and stalls throw `IncompleteChunkException` (transient): with forward progress the remainder is re-requested immediately (streak reset); attempts without progress are bounded by `DownloadRetryPolicy` (default 1 s initial / 30 s max / 5 attempts, exponential backoff with jitter, `Retry-After` honoured and capped).
+- **Fault propagation (§6):** first fault recorded (`RecordFault`), siblings cancelled, `WhenAll` awaited, then: fault → `Failed` + original exception rethrown via `ExceptionDispatchInfo`; cancellation → `Cancelled` + `OperationCanceledException`; else the completion gate runs. HTTP 408/429/5xx, resets, read timeouts (now via `WaitAsync`, replacing two linked CTS allocations per read), and transient DNS failures are retryable; other 4xx, invalid ranges, identity changes, disk-full/quota/access-denied (`IsUnrecoverableFilesystemError`) fail immediately.
+- **Completion gate (§7):** `Completed` requires no-cancellation, no-fault, `RangeTracker` exact coverage (merge-based interval set; duplicates/overlaps cannot inflate), `_totalDownloaded == totalSize`, and on-disk length == totalSize. No file reread. `RangeTracker` is a standalone internal class ready to be owned by a future session object.
+- **Cancellation unification (§8, F-13):** parallel and single-stream paths both propagate `OperationCanceledException` and report `Cancelled`; terminal state mapping added to single-stream; `Cancel()` and `Dispose()` signal workers before teardown. Backoff waits are plain cancellable `Task.Delay` (no `ContinueWith` suppression).
+- **Single-stream (§10):** same retry taxonomy, resume-mismatch and mid-run total-change fail fast, final length verified when the size is known, EOF shortfall resumes (offset persists; the old byte-rollback was removed as accounting is now append-only).
+- **Test server (§11):** bounded-memory streaming (64 KB pooled buffers, incremental generation, streaming gzip) replaced full-body materialization; new knobs: `Respond200ToRanges`, `ContentRangeOverride`, `RetryAfterSeconds`, identity switching after N requests. All prior profiles preserved.
+
 *End of ARCHITECTURE.md.*

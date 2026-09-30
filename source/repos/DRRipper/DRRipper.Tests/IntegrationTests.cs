@@ -54,21 +54,25 @@ public sealed class IntegrationTests(ITestOutputHelper output)
         fx.AssertFileHash(path, fx.ExpectedHash, "T-INT-02");
     }
 
+    /// <summary>
+    /// T-INT-03 / required test A: short chunk body with clean EOF.
+    /// Fixed behaviour (F-01): the shortfall is resumed, never accepted —
+    /// byte-identical file, Completed only via the completion gate.
+    /// </summary>
     [Fact]
-    [Trait("Category", "KnownFailure")]
     public async Task T_INT_03_Short_Chunk_Body_With_Clean_EOF()
     {
         // Every range response gracefully ends after 1 MB of an 8 MB chunk while
-        // retaining the original Content-Range span (AUDIT.md F-01: clean EOF with
-        // written > 0 is accepted as success). Correct behaviour: retry and finish
-        // byte-identical.
+        // retaining the original Content-Range span. Correct behaviour: resume
+        // each remainder and finish byte-identical (multi-request recovery).
         await using var fx = await DownloadFixture.CreateAsync(new ServerProfile
         {
             FileSize = 20L * 1024 * 1024,
             ShortBodyBytes = 1L * 1024 * 1024,
         });
         var (path, state) = await fx.DownloadAsync(connections: 2, Timeout, output);
-        output.WriteLine($"OBSERVATION: state after short-body transfer = {state}");
+        Assert.Equal(DownloadState.Completed, state);
+        output.WriteLine($"OBSERVATION: short-body transfer needed {fx.Server.RequestCount} requests (remainder-resume, F-01 fixed).");
         fx.AssertFileHash(path, fx.ExpectedHash, "T-INT-03");
         Assert.Equal(20L * 1024 * 1024, new FileInfo(path).Length);
     }
@@ -91,34 +95,48 @@ public sealed class IntegrationTests(ITestOutputHelper output)
         fx.AssertFileHash(path, fx.ExpectedHash, "T-INT-03b");
     }
 
+    /// <summary>
+    /// T-INT-04 / required test G: persistent HTTP 500 on one range.
+    /// Fixed behaviour (F-02 + bounded retry): after bounded attempts without
+    /// progress the failure propagates out of StartAsync — never retried
+    /// forever, never reported Completed.
+    /// </summary>
     [Fact]
-    [Trait("Category", "KnownFailure")]
     public async Task T_INT_04_Persistent_500_On_One_Range()
     {
-        // One 8 MB chunk always answers 500 (AUDIT.md F-02: infinite transient retry).
-        // Bounded by a 35 s timeout so the test cannot hang; correct behaviour would
-        // be a fast, explicit failure — not silent retry, and never Completed.
+        // One 8 MB chunk always answers 500. Bounded by policy (5 attempts) plus
+        // a 90 s test timeout as a backstop; correct behaviour is an explicit
+        // DownloadFailedException preserving the 500 reason.
         const long size = 24L * 1024 * 1024;
         await using var fx = await DownloadFixture.CreateAsync(new ServerProfile { FileSize = size });
         fx.Server.Profile.RangeFaults.Add(new RangeFault(8L * 1024 * 1024, 16L * 1024 * 1024 - 1, 500));
-        var (path, state) = await fx.DownloadAsync(connections: 3, TimeSpan.FromSeconds(35), output);
-        output.WriteLine($"OBSERVATION: state after 35 s of persistent 500 = {state}");
-        fx.AssertFileHash(path, fx.ExpectedHash, "T-INT-04");
+        using var dl = new ParallelDownloader();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var ex = await Assert.ThrowsAsync<DownloadFailedException>(
+            () => dl.StartAsync(fx.Url, fx.TempDir, 3, cts.Token));
+        output.WriteLine($"OBSERVATION: persistent 500 propagated: {ex.Message}");
+        Assert.Contains("500", ex.Message);
+        Assert.Equal(DownloadState.Failed, dl.GetState());
     }
 
+    /// <summary>
+    /// T-INT-05 / required test E: wrong Content-Range total is rejected.
+    /// Fixed behaviour (§4): the session total is authoritative; a disagreeing
+    /// Content-Range fails fast instead of downloading against a lie.
+    /// </summary>
     [Fact]
-    public async Task T_INT_05_Wrong_ContentRange_Total_Is_Ignored()
+    public async Task T_INT_05_Wrong_ContentRange_Total_Is_Rejected()
     {
-        // Server returns 206 with a lying Content-Range total (AUDIT.md P-03).
-        // Characterizes that the engine never validates it: file is still correct.
-        // PASS here documents a validation gap, not correctness of the gap.
+        // Server returns 206 with a lying Content-Range total. Correct behaviour:
+        // fail fast with DownloadFailedException (never silently accept).
         const long size = 8L * 1024 * 1024;
         await using var fx = await DownloadFixture.CreateAsync(
             new ServerProfile { FileSize = size, WrongContentRangeTotal = size * 2 });
-        var (path, state) = await fx.DownloadAsync(connections: 2, Timeout, output);
-        Assert.Equal(DownloadState.Completed, state);
-        fx.AssertFileHash(path, fx.ExpectedHash, "T-INT-05");
-        output.WriteLine("OBSERVATION: wrong Content-Range total went undetected (P-03).");
+        using var dl = new ParallelDownloader();
+        using var cts = new CancellationTokenSource(Timeout);
+        var ex = await DownloadFixture.ThrowsDownloadFailedAsync(
+            () => dl.StartAsync(fx.Url, fx.TempDir, 2, cts.Token), output);
+        Assert.Equal(DownloadState.Failed, dl.GetState());
     }
 
     [Fact]

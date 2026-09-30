@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Compression;
 using System.Net;
 using System.Text.Json;
@@ -52,8 +53,8 @@ public sealed class TestDownloadServer : IAsyncDisposable
         if (profile != null)
             CopyProfile(profile, server.Profile);
 
-        app.MapGet("/file/{*name}", (HttpContext ctx) => ServeAsync(ctx, server.Profile, server.Log));
-        app.MapMethods("/file/{*name}", new[] { HttpMethods.Head }, (HttpContext ctx) => ServeAsync(ctx, server.Profile, server.Log));
+        app.MapGet("/file/{*name}", (HttpContext ctx) => server.HandleFileAsync(ctx));
+        app.MapMethods("/file/{*name}", new[] { HttpMethods.Head }, (HttpContext ctx) => server.HandleFileAsync(ctx));
         app.MapGet("/__log", (HttpContext ctx) =>
         {
             ctx.Response.ContentType = "application/json";
@@ -90,6 +91,11 @@ public sealed class TestDownloadServer : IAsyncDisposable
         to.RangeFaults.AddRange(from.RangeFaults);
         to.GzipResponses = from.GzipResponses;
         to.WrongContentRangeTotal = from.WrongContentRangeTotal;
+        to.ContentRangeOverride = from.ContentRangeOverride;
+        to.Respond200ToRanges = from.Respond200ToRanges;
+        to.RetryAfterSeconds = from.RetryAfterSeconds;
+        to.IdentitySwitchAfterRequests = from.IdentitySwitchAfterRequests;
+        to.SwitchedETag = from.SwitchedETag;
         to.ShortBodyBytes = from.ShortBodyBytes;
         to.ConstantContent = from.ConstantContent;
         to.ConstantByte = from.ConstantByte;
@@ -122,12 +128,14 @@ public sealed class TestDownloadServer : IAsyncDisposable
         lock (_logLock) _log.Add(record);
     }
 
+    private long _fileRequestSequence;
+
     private async Task HandleFileAsync(HttpContext ctx)
     {
-        await ServeAsync(ctx, Profile, Log);
+        await ServeAsync(ctx, Profile, Log, Interlocked.Increment(ref _fileRequestSequence));
     }
 
-    private static async Task ServeAsync(HttpContext ctx, ServerProfile profile, Action<RequestRecord> log)
+    private static async Task ServeAsync(HttpContext ctx, ServerProfile profile, Action<RequestRecord> log, long sequence = 0)
     {
         var isHead = HttpMethods.IsHead(ctx.Request.Method);
         var rangeHeader = ctx.Request.Headers.Range.FirstOrDefault();
@@ -141,19 +149,24 @@ public sealed class TestDownloadServer : IAsyncDisposable
             {
                 status = global;
                 ctx.Response.StatusCode = status;
+                if (profile.RetryAfterSeconds is int ra)
+                    ctx.Response.Headers.RetryAfter = ra.ToString();
                 return;
             }
 
             long size = profile.FileSize;
+            string etag = profile.IdentitySwitchAfterRequests is int switchAfter && sequence > switchAfter
+                ? (profile.SwitchedETag ?? profile.ETag)
+                : profile.ETag;
             ctx.Response.Headers.AcceptRanges = profile.SupportRanges ? "bytes" : "none";
-            ctx.Response.Headers.ETag = profile.ETag;
+            ctx.Response.Headers.ETag = etag;
             ctx.Response.Headers.LastModified = profile.LastModified.ToString("R");
             ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{profile.FileName}\"";
 
             long start = 0, end = size - 1;
             bool isRange = false;
 
-            if (profile.SupportRanges && !string.IsNullOrEmpty(rangeHeader))
+            if (profile.SupportRanges && !profile.Respond200ToRanges && !string.IsNullOrEmpty(rangeHeader))
             {
                 if (!TryParseRange(rangeHeader, size, out start, out end))
                 {
@@ -170,6 +183,8 @@ public sealed class TestDownloadServer : IAsyncDisposable
                     {
                         status = fault.Status;
                         ctx.Response.StatusCode = status;
+                        if (profile.RetryAfterSeconds is int fra)
+                            ctx.Response.Headers.RetryAfter = fra.ToString();
                         return;
                     }
                 }
@@ -180,32 +195,25 @@ public sealed class TestDownloadServer : IAsyncDisposable
             ctx.Response.StatusCode = status;
             if (isRange)
             {
-                long reportedTotal = profile.WrongContentRangeTotal ?? size;
-                ctx.Response.Headers.ContentRange = $"bytes {start}-{end}/{reportedTotal}";
+                ctx.Response.Headers.ContentRange = profile.ContentRangeOverride
+                    ?? $"bytes {start}-{end}/{profile.WrongContentRangeTotal ?? size}";
             }
 
-            byte[] body = DeterministicContent.Slice(start, (int)length, profile.Seed,
-                profile.ConstantContent, profile.ConstantByte);
+            // Broken-server emulation: short body, truthful short Content-Length,
+            // original Content-Range span retained, graceful completion (clean EOF).
+            if (!isHead && profile.ShortBodyBytes is long cap && length > cap)
+                length = cap;
 
-            if (!isHead && profile.ShortBodyBytes is long cap && body.Length > cap)
-            {
-                // Broken-server emulation: short body, truthful short Content-Length,
-                // original Content-Range span retained, graceful completion (clean EOF).
-                body = body[0..(int)cap];
-            }
-
-            bool gzip = profile.GzipResponses && AcceptsGzip(ctx);
+            bool gzip = !isHead && profile.GzipResponses && AcceptsGzip(ctx);
             if (gzip)
             {
-                using var ms = new MemoryStream();
-                using (var gz = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
-                    gz.Write(body, 0, body.Length);
-                body = ms.ToArray();
+                // Compressed size is unknowable upfront: chunked transfer.
                 ctx.Response.Headers.ContentEncoding = "gzip";
             }
-
-            if (profile.SendContentLength)
-                ctx.Response.ContentLength = body.Length;
+            else if (profile.SendContentLength)
+            {
+                ctx.Response.ContentLength = length;
+            }
 
             if (isHead)
                 return;
@@ -213,32 +221,59 @@ public sealed class TestDownloadServer : IAsyncDisposable
             if (profile.InitialLatency is { } latency)
                 await Task.Delay(latency, ctx.RequestAborted);
 
+            // Bounded-memory deterministic streaming: 64 KB reusable buffer,
+            // content generated incrementally (never materialize full bodies).
             long budget = profile.TruncateAfterBytes ?? long.MaxValue;
             long throttle = profile.BytesPerSecond ?? long.MaxValue;
             const int chunk = 64 * 1024;
+            var scratch = ArrayPool<byte>.Shared.Rent(chunk);
             long offset = 0;
-            while (offset < body.Length && offset < budget)
+            try
             {
-                ctx.RequestAborted.ThrowIfCancellationRequested();
-                int n = (int)Math.Min(chunk, Math.Min(body.Length - offset, budget - offset));
-                long sliceStart = Environment.TickCount64;
-                await ctx.Response.Body.WriteAsync(body.AsMemory((int)offset, n), ctx.RequestAborted);
-                await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
-                offset += n;
-                bytesWritten += n;
-                if (throttle != long.MaxValue)
+                Stream sink = ctx.Response.Body;
+                GZipStream? gz = null;
+                if (gzip)
                 {
-                    double msOwed = n * 1000.0 / throttle;
-                    double msSpent = Environment.TickCount64 - sliceStart;
-                    if (msOwed > msSpent)
-                        await Task.Delay(TimeSpan.FromMilliseconds(msOwed - msSpent), ctx.RequestAborted);
+                    gz = new GZipStream(ctx.Response.Body, CompressionLevel.Fastest, leaveOpen: true);
+                    sink = gz;
+                }
+                try
+                {
+                    while (offset < length && offset < budget)
+                    {
+                        ctx.RequestAborted.ThrowIfCancellationRequested();
+                        int n = (int)Math.Min(chunk, Math.Min(length - offset, budget - offset));
+                        DeterministicContent.FillSlice(start + offset, scratch.AsSpan(0, n),
+                            profile.Seed, profile.ConstantContent, profile.ConstantByte);
+                        long sliceStart = Environment.TickCount64;
+                        await sink.WriteAsync(scratch.AsMemory(0, n), ctx.RequestAborted);
+                        await sink.FlushAsync(ctx.RequestAborted);
+                        offset += n;
+                        bytesWritten += n;
+                        if (throttle != long.MaxValue)
+                        {
+                            double msOwed = n * 1000.0 / throttle;
+                            double msSpent = Environment.TickCount64 - sliceStart;
+                            if (msOwed > msSpent)
+                                await Task.Delay(TimeSpan.FromMilliseconds(msOwed - msSpent), ctx.RequestAborted);
+                        }
+                    }
+                }
+                finally
+                {
+                    // Finish the gzip trailer so well-formed clients see clean EOF.
+                    if (gz != null) await gz.DisposeAsync();
+                }
+
+                if (offset < length)
+                {
+                    // Deliberate truncation: destroy the connection mid-body.
+                    ctx.Abort();
                 }
             }
-
-            if (offset < body.Length)
+            finally
             {
-                // Deliberate truncation: destroy the connection mid-body.
-                ctx.Abort();
+                ArrayPool<byte>.Shared.Return(scratch);
             }
         }
         catch (OperationCanceledException)

@@ -79,4 +79,26 @@ Implemented in `DRRipper.Tests` against `DRRipper.TestServer`; full results in B
 
 Not yet implemented: remaining T-UNIT/T-STRESS/T-PERF-sweep/T-SEC IDs, 429/503 and multi-range cases — deferred to later tickets.
 
+## 8. Ticket #003 implementation mapping (engine fixes 2026-09-30)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| A short clean EOF | T-INT-03 rewritten: shortfall resumes to byte-identical file | PASS |
+| B 200 during segmented transfer | `B_RangeAnswered200_Falls_Back_To_SingleStream` (+ `Respond200ToRanges` server knob) | PASS |
+| C/D wrong Content-Range start/end | Rejection tests (+ `ContentRangeOverride` knob) | PASS |
+| E wrong Content-Range total | T-INT-05 rewritten to assert fail-fast rejection | PASS |
+| F premature closure, zero progress | `F_ZeroByte_Abort_Exhausts_Bounded_Retries` | PASS |
+| G persistent 500 | T-INT-04 rewritten to assert bounded `DownloadFailedException` | PASS |
+| H 429 + Retry-After | `H_RateLimit_With_RetryAfter_Fails_Bounded` (elapsed ≥ header) | PASS |
+| I/J parallel + single-stream cancel | OCE family, `Cancelled`, never `Completed` | PASS |
+| K cancel during backoff | Surfaces in well under the exhaustion time | PASS |
+| L failed worker amid active workers | `L_Failed_Worker_Stops_Session_With_Reason` (reason preserved) | PASS |
+| M duplicate/overlap accounting | `RangeTracker` unit tests (exact/duplicate/overlap/out-of-order/partial/bounds) | PASS |
+| N disk-full / unrecoverable FS | Classifier unit tests (synthetic HResults) + locked-file fail-fast integration | PASS |
+| O byte-identical success | `O_Large_Download_Is_ByteIdentical` (32 MB, seed 7, 8 conns) | PASS |
+| P/Q no-range + unknown-size fallback | Existing T-INT-06/07, unchanged | PASS |
+| Extra §4 identity consistency | `IdentitySwitch_MidDownload_Is_Rejected` (ETag switch mid-run aborts) | PASS |
+
+Suite totals after Ticket #003: **30 passing, 2 known-failing** (T-REC-01/05 persistent cross-process recovery — next ticket), 0 unexpected.
+
 *End of TEST_PLAN.md.*
