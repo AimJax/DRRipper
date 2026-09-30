@@ -1,3 +1,6 @@
 <Solution>
   <Project Path="DRRipper/DRRipper.csproj" />
+  <Project Path="DRRipper.TestServer/DRRipper.TestServer.csproj" />
+  <Project Path="DRRipper.Tests/DRRipper.Tests.csproj" />
+  <Project Path="DRRipper.Benchmarks/DRRipper.Benchmarks.csproj" />
 </Solution>

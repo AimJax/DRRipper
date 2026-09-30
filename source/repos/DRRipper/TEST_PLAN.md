@@ -62,4 +62,21 @@
 - **T-SEC-02** Redirect chain to third-party host: credentials/`Authorization` must not leak cross-host; hop limit enforced (covers P-09).
 - **T-SEC-03** URL with embedded userinfo: never written to logs/metadata in recoverable form.
 
+## 7. Ticket #002 implementation mapping (baseline status 2026-09-30)
+
+Implemented in `DRRipper.Tests` against `DRRipper.TestServer`; full results in BASELINE.md.
+
+| Plan ID | Implementation | Status |
+|---|---|---|
+| T-UNIT-01 | Black-box range-coverage assertion (chunk math is inline/private; production accessibility intentionally unchanged) | PASS |
+| T-INT-01/05/06/07/08 | As specified | PASS |
+| T-INT-02 | Well-formed gzip over compressible content — passes via Content-Length stripping + span fallback; residual F-08 hazard documented | PASS with notes |
+| T-INT-03 | Graceful short body + clean EOF | KNOWN FAILURE (F-01) |
+| T-INT-03b (extra) | Aborted (RST) chunk body — retry recovers correctly | PASS |
+| T-INT-04 | Persistent 500 on one range, 35 s bound | KNOWN FAILURE (F-02) |
+| T-REC-01/05 | Interrupt → restart retransmits fully; content correct | KNOWN FAILURE (F-03) |
+| T-REC-03 | Identity switch masked by full re-download | PASS with notes (F-04 latent) |
+
+Not yet implemented: remaining T-UNIT/T-STRESS/T-PERF-sweep/T-SEC IDs, 429/503 and multi-range cases — deferred to later tickets.
+
 *End of TEST_PLAN.md.*

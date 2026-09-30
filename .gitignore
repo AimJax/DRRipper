@@ -12,3 +12,7 @@ publish/
 .env
 .env.*
 !.env.example
+
+# Ticket #002: test and benchmark artifacts (never commit results)
+TestResults/
+source/repos/DRRipper/DRRipper.Benchmarks/results/
