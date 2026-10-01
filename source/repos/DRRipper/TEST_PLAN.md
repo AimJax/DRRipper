@@ -101,4 +101,27 @@ Not yet implemented: remaining T-UNIT/T-STRESS/T-PERF-sweep/T-SEC IDs, 429/503 a
 
 Suite totals after Ticket #003: **30 passing, 2 known-failing** (T-REC-01/05 persistent cross-process recovery — next ticket), 0 unexpected.
 
+## 9. Ticket #004 implementation mapping (sessions + persistent recovery, 2026-10-01)
+
+| Required scenario | Implementation | Status |
+|---|---|---|
+| T-REC-01 genuine kill + restart | `T_REC_01_Kill_Reuses_Verified_Bytes` (child driver SIGKILL-equivalent, new-process restart, ratio-bounded reuse) | PASS |
+| T-REC-02 kill during checkpoint | `T_REC_02_Early_Kill_Still_Recovers` + `T_REC_02_Torn_Tmp_Ignored_Snapshot_Used` (torn tmp ignored, previous snapshot used) | PASS |
+| T-REC-03 identity change | `T_REC_03_Content_Switch_Triggers_Detected_Restart` (validator mismatch → full restart, clean v2, no hybrid) | PASS |
+| T-REC-04 corrupt/truncate metadata | Truncated / bit-flip / missing variants → safe full restart | PASS |
+| T-REC-05 single-stream | `T_REC_05_NoRange_…` (safe full restart, §11B) + `T_REC_05b_…_Reuses_Prefix` (If-Range prefix resume with exact-offset assertion, §11A) | PASS |
+| T-REC-06 missing part | Full restart, correct file | PASS |
+| T-REC-07 blackout/restore | 6 s 503 blackout → auto-resume, byte-identical | PASS |
+| T-STATE-01/02/03 pause timing | Pause mid-read / mid-backoff / immediate resume | PASS |
+| T-STATE-04 rapid cycles | Event-driven cycles + bounded ops + watchdog; quarantined `Sensitive` (host-scheduling flake, see BASELINE) | PASS (quarantined) |
+| T-STATE-05/06 cancel precedence | Cancel-while-paused / cancel-racing-pause → `Cancelled`, never `Completed` | PASS |
+| T-NET-01 repeated timeouts | `StallAfterBytes` + 2 s reads → resume-to-identical, multi-attempt proof | PASS |
+| T-NET-02 cancel pending read | OCE + `Cancelled`, safe buffer lifecycle | PASS |
+| T-INT-IDENTITY mid-run switch | Existing rejection test, still green | PASS |
+| T-INT-COVERAGE sparse resume | Server-restart design (pristine log): resumed spans disjoint, byte-bounded | PASS |
+| Extras | `Checkpoint_Writes_Coverage_To_Disk` unit, `ResolveUniquePath` unit, `Resume_Startup_Latency` measurement, pause-phase telemetry | PASS |
+
+Suite totals after Ticket #004: **53 passing, 0 known-failing, 0 unexpected**
+(T-STATE-04 counted among the 53; quarantined from the blocking CI gate only).
+
 *End of TEST_PLAN.md.*

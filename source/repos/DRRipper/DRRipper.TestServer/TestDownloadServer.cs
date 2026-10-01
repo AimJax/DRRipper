@@ -24,6 +24,9 @@ public sealed class TestDownloadServer : IAsyncDisposable
     public ServerProfile Profile { get; } = ServerProfile.Default();
     public string BaseAddress { get; private set; } = string.Empty;
 
+    /// <summary>Bound port parsed from <see cref="BaseAddress"/> (for same-port restarts).</summary>
+    public int BoundPort => new Uri(BaseAddress).Port;
+
     private TestDownloadServer(WebApplication app)
     {
         _app = app;
@@ -86,6 +89,7 @@ public sealed class TestDownloadServer : IAsyncDisposable
         to.SendContentLength = from.SendContentLength;
         to.TruncateAfterBytes = from.TruncateAfterBytes;
         to.BytesPerSecond = from.BytesPerSecond;
+        to.StallAfterBytes = from.StallAfterBytes;
         to.InitialLatency = from.InitialLatency;
         to.GlobalStatus = from.GlobalStatus;
         to.RangeFaults.AddRange(from.RangeFaults);
@@ -242,6 +246,12 @@ public sealed class TestDownloadServer : IAsyncDisposable
                     while (offset < length && offset < budget)
                     {
                         ctx.RequestAborted.ThrowIfCancellationRequested();
+                        if (profile.StallAfterBytes is long stallAt && offset >= stallAt)
+                        {
+                            // Stall: hold the connection open with no bytes and no
+                            // EOF until the client aborts (read-timeout probe).
+                            await Task.Delay(Timeout.InfiniteTimeSpan, ctx.RequestAborted);
+                        }
                         int n = (int)Math.Min(chunk, Math.Min(length - offset, budget - offset));
                         DeterministicContent.FillSlice(start + offset, scratch.AsSpan(0, n),
                             profile.Seed, profile.ConstantContent, profile.ConstantByte);
@@ -288,7 +298,7 @@ public sealed class TestDownloadServer : IAsyncDisposable
         finally
         {
             log(new RequestRecord(DateTimeOffset.UtcNow, ctx.Request.Method, ctx.Request.Path.ToString(),
-                rangeHeader, status, bytesWritten, connectionId));
+                rangeHeader, status, bytesWritten, connectionId, ctx.Connection.RemotePort));
         }
     }
 

@@ -18,6 +18,7 @@ public static class Program
         long SizeBytes, int Connections, int Iteration,
         double Seconds, double AvgMBps, double PeakObservedMBps,
         double CpuSeconds, long PeakWorkingSetBytes, int HandleDelta,
+        long AllocatedBytes,
         int RequestCount, long BytesTransmitted, long RetransmittedBytes,
         double FinalizationMs, bool IntegrityOk);
 
@@ -45,7 +46,7 @@ public static class Program
                     results.Add(r);
                     Console.WriteLine($"  conn={c,2} iter={i}: {r.AvgMBps,8:F1} MB/s  " +
                         $"peakObs={r.PeakObservedMBps,8:F1}  cpu={r.CpuSeconds,5:F1}s  " +
-                        $"ws={r.PeakWorkingSetBytes / 1048576,5}MB  reqs={r.RequestCount,3}  " +
+                        $"ws={r.PeakWorkingSetBytes / 1048576,5}MB  alloc={r.AllocatedBytes / 1048576,5}MB  reqs={r.RequestCount,3}  " +
                         $"reTx={r.RetransmittedBytes / 1024,7}KB  final={r.FinalizationMs,6:F0}ms  " +
                         (r.IntegrityOk ? "OK" : "CORRUPT"));
                 }
@@ -84,14 +85,25 @@ public static class Program
         var proc = Process.GetCurrentProcess();
         TimeSpan cpu0 = proc.TotalProcessorTime;
         int handles0 = proc.HandleCount;
+        // Allocations include the in-process test server (same process by design);
+        // useful relatively across engine changes, not as absolute engine cost.
+        long allocated0 = GC.GetAllocatedBytesForCurrentThread();
 
         double peakObs = 0;
-        DateTime lastProgress = DateTime.UtcNow;
+        // Finalization starts when downloaded bytes stop growing (gate + flush +
+        // rename tail). The progress timer keeps ticking through finalize, so the
+        // last tick is NOT the transfer end — track the last byte-growth instead.
+        DateTime lastByteGrowth = DateTime.UtcNow;
+        long maxSeenBytes = 0;
         using var dl = new ParallelDownloader();
         dl.ProgressChanged += p =>
         {
             if (p.CurrentSpeedMBps > peakObs) peakObs = p.CurrentSpeedMBps;
-            lastProgress = DateTime.UtcNow;
+            if (p.TotalBytesDownloaded > maxSeenBytes)
+            {
+                maxSeenBytes = p.TotalBytesDownloaded;
+                lastByteGrowth = DateTime.UtcNow;
+            }
         };
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(20));
@@ -116,8 +128,9 @@ public static class Program
             seconds, size / 1048576.0 / Math.Max(seconds, 1e-9), peakObs,
             (proc.TotalProcessorTime - cpu0).TotalSeconds,
             proc.PeakWorkingSet64, proc.HandleCount - handles0,
+            GC.GetAllocatedBytesForCurrentThread() - allocated0,
             log.Count, transmitted, Math.Max(0, transmitted - size),
-            (returned - lastProgress).TotalMilliseconds, ok);
+            (returned - lastByteGrowth).TotalMilliseconds, ok);
 
         try { Directory.Delete(dir, recursive: true); } catch { }
         return result;
@@ -139,6 +152,7 @@ public static class Program
         sb.AppendLine($"| {size / 1048576} | {conn} | {Med(ok.Select(r => r.AvgMBps)):F1} " +
             $"| {Med(ok.Select(r => r.PeakObservedMBps)):F1} | {Med(ok.Select(r => r.CpuSeconds)):F2} " +
             $"| {Med(ok.Select(r => (double)r.PeakWorkingSetBytes / 1048576)):F0} " +
+            $"| {Med(ok.Select(r => (double)r.AllocatedBytes / 1048576)):F0} " +
             $"| {Med(ok.Select(r => (double)r.RequestCount)):F0} " +
             $"| {Med(ok.Select(r => (double)r.RetransmittedBytes / 1024)):F0} " +
             $"| {Med(ok.Select(r => r.FinalizationMs)):F0} |");
@@ -153,8 +167,8 @@ public static class Program
         sb.AppendLine($"- Environment: {env}");
         sb.AppendLine($"- Iterations per cell: {(results.Select(r => r.Iteration).DefaultIfEmpty(0).Max())}, median reported; CORRUPT runs excluded.");
         sb.AppendLine();
-        sb.AppendLine("| Size (MB) | Conns | Median MB/s | Median peak-obs MB/s | Median CPU s | Median WS MB | Median reqs | Median reTx KB | Median final ms |");
-        sb.AppendLine("|---|---|---|---|---|---|---|---|---|");
+        sb.AppendLine("| Size (MB) | Conns | Median MB/s | Median peak-obs MB/s | Median CPU s | Median WS MB | Median alloc MB | Median reqs | Median reTx KB | Median final ms |");
+        sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|");
         foreach (var size in results.Select(r => r.SizeBytes).Distinct().OrderBy(x => x))
             foreach (var c in results.Select(r => r.Connections).Distinct().OrderBy(x => x))
                 AppendMedianRow(sb, results, size, c);

@@ -105,6 +105,31 @@ namespace DRRipper
                 _coveredBytes += (ne - ns + 1);
             }
         }
+
+        /// <summary>Ordered snapshot of merged completed spans (for checkpoints).</summary>
+        public List<(long Start, long End)> SnapshotRanges()
+        {
+            lock (_lock)
+            {
+                var copy = _spans.ToList();
+                copy.Sort((a, b) => a.Start.CompareTo(b.Start));
+                return copy;
+            }
+        }
+
+        /// <summary>Complement of coverage over [0,total): ranges still to download.</summary>
+        public List<(long Start, long End)> MissingRanges()
+        {
+            var missing = new List<(long Start, long End)>();
+            long cursor = 0;
+            foreach (var (s, e) in SnapshotRanges())
+            {
+                if (s > cursor) missing.Add((cursor, s - 1));
+                cursor = Math.Max(cursor, e + 1);
+            }
+            if (cursor < _totalSize) missing.Add((cursor, _totalSize - 1));
+            return missing;
+        }
     }
 
     // Simple pause token using ManualResetEventSlim
@@ -126,6 +151,9 @@ namespace DRRipper
 
     public class DownloadMetadata
     {
+        // Obsolete v1 remaining-queue format (Ticket #004): superseded by the
+        // versioned RecoveryMetadata (completed-range snapshots). Kept only so
+        // external references still compile; never written or trusted anymore.
         public string Url { get; set; } = string.Empty;
         public string FileName { get; set; } = string.Empty;
         public long TotalSize { get; set; }
@@ -138,15 +166,15 @@ namespace DRRipper
     {
         private readonly SocketsHttpHandler _handler;
         private readonly HttpClient _client;
-        private readonly PauseToken _pauseToken = new();
-        private CancellationTokenSource? _internalCts;
+        internal HttpClient Client => _client;
         private DownloadState _state = DownloadState.Idle;
         private readonly object _stateLock = new();
-        private string? _currentMetaPath;
-        private string? _currentUrl;
+        // The active download session (Ticket #004): all per-run mutable state
+        // lives on the session, never on this facade (fixes F-06 staleness).
+        private DownloadSession? _session;
+        private readonly object _sessionLock = new();
         private string? _currentResolvedFileName;
         private long _currentTotalSize;
-        private ConcurrentQueue<(long start, long end)>? _currentChunks;
         private long _totalDownloaded = 0;
         private long _reportBytes = 0;
         private DateTime _reportTime = DateTime.MinValue;
@@ -157,18 +185,24 @@ namespace DRRipper
         private double _smoothedSpeed = 0.0;
         private readonly object _timerLock = new();
         private string _statusMessage = string.Empty;
-        // track active in-flight chunks so Pause() can recover them
-        private readonly ConcurrentDictionary<long, long> _activeChunks = new();
         // network availability handler reference for proper unsubscribe
         private System.Net.NetworkInformation.NetworkAvailabilityChangedEventHandler? _networkAvailabilityHandler;
 
         /// <summary>Bounded retry policy applied to transient failures (defaults: 1s/30s/5 attempts).</summary>
         public DownloadRetryPolicy RetryPolicy { get; set; } = DownloadRetryPolicy.Default;
 
-        // Controlled fault propagation for the current StartAsync run.
-        private readonly object _faultLock = new();
-        private Exception? _sessionFault;
-        private bool _fallbackSingleStream;
+        /// <summary>Per-read stall timeout (Ticket #004 §8: testable, default 30s).</summary>
+        public TimeSpan ReadTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+        /// <summary>Minimum interval between recovery checkpoints (Ticket #004 §4; pause/final always checkpoint).</summary>
+        public TimeSpan CheckpointInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+        /// <summary>Fixed segment size for the dynamic chunk queue (unchanged default).</summary>
+        internal const long SegmentSize = 8 * 1024 * 1024;
+
+        internal void AddDownloaded(long bytes) => Interlocked.Add(ref _totalDownloaded, bytes);
+        internal long ReadDownloaded() => Interlocked.Read(ref _totalDownloaded);
+        internal void ResetDownloaded(long value) => Interlocked.Exchange(ref _totalDownloaded, value);
 
         // Win32 power management to prevent system sleep during downloads
         private const uint ES_CONTINUOUS = 0x80000000u;
@@ -176,13 +210,9 @@ namespace DRRipper
         [DllImport("kernel32.dll")]
         private static extern uint SetThreadExecutionState(uint esFlags);
 
-        // Per-request cancellation sources tracked by chunk start so Pause can cancel all in-flight requests
-        private readonly object _requestCtsLock = new object();
-        private readonly ConcurrentDictionary<long, CancellationTokenSource> _activeRequestCts = new();
-
         public event Action<DownloadProgress>? ProgressChanged;
         public event Action<DownloadState>? StateChanged;
-        private const int CHUNK_SIZE = 8 * 1024 * 1024; // 8MB chunks for dynamic stealing (reduce requests to avoid CDN tarpitting) 
+        private const int CHUNK_SIZE = 8 * 1024 * 1024; // 8MB chunks for dynamic stealing (reduce requests to avoid CDN tarpitting)
 
         // Filename sanitization to prevent invalid chars and path traversal
         private static string SanitizeFileName(string fileName)
@@ -198,7 +228,7 @@ namespace DRRipper
         }
 
         // Ensure target drive has enough free space before pre-allocating file
-        private static void EnsureEnoughDiskSpace(string targetDirectory, long requiredBytes)
+        internal static void EnsureEnoughDiskSpace(string targetDirectory, long requiredBytes)
         {
             try
             {
@@ -281,24 +311,27 @@ namespace DRRipper
             _client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "*/*");
             _client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
             _client.Timeout = Timeout.InfiniteTimeSpan;
-            // Listen for network availability changes to trigger retry/resume
+            // Listen for network availability changes: surface Retrying while the
+            // active session self-recovers (workers own retry). Never auto-resume
+            // a user-paused session (Ticket #004 §9).
             _networkAvailabilityHandler = (s, e) =>
             {
-                if (e.IsAvailable)
+                DownloadSession? session;
+                lock (_sessionLock) session = _session;
+                if (session == null) return;
+                lock (_stateLock)
                 {
-                    if (_state == DownloadState.Retrying)
-                        Resume();
-                }
-                else
-                {
-                    if (_state == DownloadState.Downloading)
+                    if (!e.IsAvailable && _state == DownloadState.Downloading)
                         SetState(DownloadState.Retrying, "Network Lost - Reconnecting...");
+                    else if (e.IsAvailable && _state == DownloadState.Retrying &&
+                        session.Phase == SessionPhase.Downloading)
+                        SetState(DownloadState.Downloading);
                 }
             };
             System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += _networkAvailabilityHandler;
         }
 
-        private void SetState(DownloadState s, string? customMessage = null)
+        internal void SetState(DownloadState s, string? customMessage = null)
         {
             lock (_stateLock) { _state = s; }
 
@@ -345,76 +378,38 @@ namespace DRRipper
 
         public void Pause()
         {
-            _pauseToken.Pause();
-            SetState(DownloadState.Paused);
-            // actively cancel any in-flight HTTP requests so hung sockets are aborted
-            try
-            {
-                lock (_requestCtsLock)
-                {
-                    // Cancel all active per-request tokens
-                    foreach (var kv in _activeRequestCts)
-                    {
-                        try
-                        {
-                            var cts = kv.Value;
-                            if (cts != null && !cts.IsCancellationRequested)
-                            {
-                                try { cts.Cancel(); } catch { }
-                            }
-                        }
-                        catch { }
-                    }
-                }
-            }
-            catch { }
-            // persist remaining chunks metadata if available
-            try
-            {
-                if (!string.IsNullOrWhiteSpace(_currentMetaPath) && !string.IsNullOrWhiteSpace(_currentUrl) && _currentChunks != null)
-                {
-                    // Re-queue any active in-flight chunks so they are not lost when pausing
-                    try
-                    {
-                        foreach (var kv in _activeChunks)
-                        {
-                            _currentChunks.Enqueue((kv.Key, kv.Value));
-                        }
-                    }
-                    catch { }
-
-                    SaveMetadata(_currentMetaPath, _currentUrl, _currentResolvedFileName ?? string.Empty, _currentTotalSize, _currentChunks);
-                    // Clear active chunk tracking to avoid duplicates if Pause is called multiple times
-                    try { _activeChunks.Clear(); } catch { }
-                }
-            }
-            catch { }
+            DownloadSession? session;
+            lock (_sessionLock) session = _session;
+            if (session == null) return;
+            // Bounded acknowledgement wait (15s): hung sockets were aborted, so
+            // workers settle fast; never block the UI thread indefinitely.
+            try { session.RequestPause(TimeSpan.FromSeconds(15)); } catch { }
         }
 
         public void Resume()
         {
-            _pauseToken.Resume();
-            SetState(DownloadState.Downloading);
-            // No explicit per-request CTS disposal here; workers will create fresh per-request tokens as needed on resume
-            // do not recreate internalCts here; resume is cooperative
-            // Reset speed window so instantaneous speed isn't diluted by paused time
-            ResetSpeedWindow();
+            DownloadSession? session;
+            lock (_sessionLock) session = _session;
+            if (session == null) return;
+            try { session.RequestResume(); } catch { }
         }
 
         public void Cancel()
         {
-            _pauseToken.Resume();
-            _internalCts?.Cancel();
-            // remove metadata
-            try { if (!string.IsNullOrWhiteSpace(_currentMetaPath) && File.Exists(_currentMetaPath)) File.Delete(_currentMetaPath); } catch { }
-            SetState(DownloadState.Cancelled);
+            DownloadSession? session;
+            lock (_sessionLock) session = _session;
+            // Cancellation takes precedence over pause (Ticket #004 §9) and drops
+            // the partial download; with no active session just report Cancelled.
+            try { session?.RequestCancel(); } catch { }
+            if (session == null) SetState(DownloadState.Cancelled);
         }
 
         public void Dispose()
         {
-            // Signal workers first so teardown never races in-flight requests:
-            // cancellation is observed before the client/handler go away.
-            try { _internalCts?.Cancel(); } catch { }
+            // Stop the active session WITHOUT deleting partial files, so teardown
+            // never races in-flight requests and paused downloads stay recoverable.
+            // Cancellation is observed before the client/handler go away.
+            try { lock (_sessionLock) _session?.Teardown(); } catch { }
             try
             {
                 if (_networkAvailabilityHandler != null)
@@ -440,7 +435,7 @@ namespace DRRipper
             GC.SuppressFinalize(this);
         }
 
-        private void ResetSpeedWindow()
+        internal void ResetSpeedWindow()
         {
             // Set report bytes to current total and reset report time to now
             var cur = Interlocked.Read(ref _totalDownloaded);
@@ -489,30 +484,31 @@ namespace DRRipper
 
 
 
-        private void SaveMetadata(string metaPath, string url, string fileName, long totalSize, ConcurrentQueue<(long start, long end)> chunks)
+        /// <summary>Begin per-run progress reporting for a transfer of known total.</summary>
+        internal void StartReporting(long totalSize, string resolvedFileName)
         {
-            try
+            _currentResolvedFileName = resolvedFileName;
+            _currentTotalSize = totalSize;
+            Interlocked.Exchange(ref _totalDownloaded, 0);
+            Interlocked.Exchange(ref _reportBytes, 0);
+            lock (_reportLock) { _reportTime = DateTime.MinValue; }
+            Interlocked.Exchange(ref _lastReportBytes, Interlocked.Read(ref _totalDownloaded));
+            lock (_timerLock)
             {
-                var arr = chunks.ToArray();
-                var meta = new DownloadMetadata
-                {
-                    Url = url,
-                    FileName = fileName,
-                    TotalSize = totalSize,
-                    ChunkOffsets = new List<long>(),
-                    ChunkLengths = new List<long>(),
-                    ChunkDownloaded = new List<long>()
-                };
-                foreach (var (s, e) in arr)
-                {
-                    meta.ChunkOffsets.Add(s);
-                    meta.ChunkLengths.Add(e - s + 1);
-                    meta.ChunkDownloaded.Add(0);
-                }
-
-                File.WriteAllText(metaPath, JsonSerializer.Serialize(meta));
+                _lastReportTime = DateTime.UtcNow;
+                _smoothedSpeed = 0.0;
+                try { _reportTimer?.Dispose(); } catch { }
+                _reportTimer = new System.Threading.Timer(ReportTimerTick, null, 250, 250);
             }
-            catch { }
+        }
+
+        internal void StopReporting()
+        {
+            lock (_timerLock)
+            {
+                try { _reportTimer?.Dispose(); } catch { }
+                _reportTimer = null;
+            }
         }
 
         // Now accepts targetDirectory and returns the final resolved full file path
@@ -688,370 +684,54 @@ namespace DRRipper
                     resolvedFileName = resolvedFileName + ext;
                 }
             }
-            // Prepare output path and ensure directory exists
+            // Prepare output path and ensure directory exists (Ticket #004 §5:
+            // recovery metadata is loaded BEFORE any truncating open happens).
             Directory.CreateDirectory(targetDirectory);
             var safeName = SanitizeFileName(resolvedFileName ?? "download.bin");
             var outputPath = Path.Combine(targetDirectory, safeName);
-
-            if (totalSize <= 0)
-            {
-                // Unknown size: fall back to single-stream download (ensure file created/truncated)
-                using (var fs0 = new FileStream(outputPath, FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite)) { }
-                await SingleStreamDownload(url, outputPath, cancellationToken);
-                return outputPath;
-            }
-
-            // Pre-allocate file to the known size (ensure disk space)
-            EnsureEnoughDiskSpace(targetDirectory, totalSize);
-            using (var fs = new FileStream(outputPath, FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite))
-            {
-                fs.SetLength(totalSize);
-            }
+            string? resolvedUrl = null;
+            try { resolvedUrl = headResp?.RequestMessage?.RequestUri?.ToString() ?? url; } catch { resolvedUrl = url; }
 
             // set initial state and status
             SetState(DownloadState.Downloading, "Starting");
 
-            if (!acceptRanges || connections == 1)
+            // Each StartAsync call owns an isolated DownloadSession (Ticket #004 §3):
+            // no per-run mutable state is shared across batch files (fixes F-06).
+            var session = new DownloadSession(this, _client)
             {
-                await SingleStreamDownload(url, outputPath, cancellationToken);
-                SetState(DownloadState.Completed);
-                _currentResolvedFileName = resolvedFileName;
-                return outputPath;
-            }
-
-            // Build dynamic chunk queue for work-stealing
-            var chunks = new ConcurrentQueue<(long start, long end)>();
-            for (long offset = 0; offset < totalSize; offset += CHUNK_SIZE)
+                Url = url,
+                TargetDirectory = targetDirectory,
+                Connections = connections,
+                ExternalToken = cancellationToken,
+                Policy = RetryPolicy ?? DownloadRetryPolicy.Default,
+                ReadTimeout = ReadTimeout,
+                CheckpointInterval = CheckpointInterval,
+                FileName = safeName,
+                FinalPath = outputPath,
+                TotalSize = totalSize,
+                ETag = sessionETag,
+                LastModified = sessionLastModified,
+                ResolvedUrl = resolvedUrl,
+                AcceptRanges = acceptRanges,
+                Mode = (acceptRanges && connections > 1 && totalSize > 0) ? "segmented" : "prefix",
+            };
+            lock (_sessionLock)
             {
-                long end = Math.Min(offset + CHUNK_SIZE - 1, totalSize - 1);
-                chunks.Enqueue((offset, end));
+                try { _session?.Teardown(); } catch { }
+                _session = session;
             }
-
-            // metadata file for resume
-            var metaPath = outputPath + ".drmeta";
-            DownloadMetadata? meta = null;
-            if (File.Exists(metaPath))
-            {
-                try { meta = JsonSerializer.Deserialize<DownloadMetadata>(File.ReadAllText(metaPath)); } catch { meta = null; }
-            }
-
-            // If metadata exists, prefer enqueuing remaining chunks from metadata
-            if (meta != null && meta.ChunkOffsets != null && meta.ChunkOffsets.Count > 0)
-            {
-                // rebuild queue from metadata remaining offsets
-                var q = new ConcurrentQueue<(long start, long end)>();
-                for (int i = 0; i < meta.ChunkOffsets.Count; i++)
-                {
-                    var s = meta.ChunkOffsets[i];
-                    var len = meta.ChunkLengths != null && i < meta.ChunkLengths.Count ? meta.ChunkLengths[i] : CHUNK_SIZE;
-                    var e = s + len - 1;
-                    q.Enqueue((s, e));
-                }
-                chunks = q;
-            }
-
-            // Open shared FileStream to hold SafeFileHandle alive
-            _currentMetaPath = metaPath;
-            _currentUrl = url;
-            _currentResolvedFileName = resolvedFileName;
-            _currentTotalSize = totalSize;
-            _currentChunks = chunks;
-            SetState(DownloadState.Downloading);
-            // Initialize reporting baseline and start periodic reporter
-            Interlocked.Exchange(ref _lastReportBytes, Interlocked.Read(ref _totalDownloaded));
-            lock (_timerLock)
-            {
-                _lastReportTime = DateTime.UtcNow;
-                _smoothedSpeed = 0.0;
-                _reportTimer = new System.Threading.Timer(ReportTimerTick, null, 250, 250);
-            }
-            using (var destStream = new FileStream(outputPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite, 4096, FileOptions.Asynchronous))
-            {
-                var handle = destStream.SafeFileHandle;
-                // initialize global counters for this download
-                Interlocked.Exchange(ref _totalDownloaded, 0);
-                Interlocked.Exchange(ref _reportBytes, 0);
-                lock (_reportLock) { _reportTime = DateTime.MinValue; }
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                // internal CTS for controlling workers (dispose the previous run's source: F-09)
-                try { _internalCts?.Dispose(); } catch { }
-                _internalCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var workerCts = _internalCts;
-                lock (_faultLock) { _sessionFault = null; }
-                _fallbackSingleStream = false;
-
-                var tasks = new List<Task>();
-                // Exact-coverage bookkeeping for the completion gate (F-12).
-                var tracker = new RangeTracker(totalSize);
-                try
-                {
-                for (int i = 0; i < connections; i++)
-                {
-                    tasks.Add(Task.Run(async () =>
-                    {
-                        while (!workerCts.Token.IsCancellationRequested)
-                        {
-                            // respect pause
-                            _pauseToken.WaitIfPaused(workerCts.Token);
-
-                            if (!chunks.TryDequeue(out var chunk))
-                            {
-                                // no work, exit
-                                break;
-                            }
-
-                            try
-                            {
-                                await DownloadChunkStrictAsync(
-                                    url, chunk, handle, totalSize,
-                                    sessionETag, sessionLastModified, tracker, workerCts.Token);
-                            }
-                            catch (OperationCanceledException) { break; }
-                            catch (RangeNotSupportedException)
-                            {
-                                // Server answered 200 to a range request: stop all
-                                // workers and restart the whole file as single-stream.
-                                _fallbackSingleStream = true;
-                                try { _internalCts?.Cancel(); } catch { }
-                                break;
-                            }
-                            catch (Exception ex)
-                            {
-                                // Fault propagation (F-02): preserve the reason,
-                                // stop siblings, never swallow, never continue.
-                                RecordFault(ex is DownloadFailedException dfe
-                                    ? dfe
-                                    : new DownloadFailedException($"Segment [{chunk.start}-{chunk.end}] failed: {ex.Message}", ex));
-                                break;
-                            }
-                        }
-                    }, workerCts.Token));
-                }
-
-                    // wait for all workers
-                    await Task.WhenAll(tasks);
-
-                    // 200-to-range fallback: truncate any partial segments and stream whole file.
-                    // The session CTS was cancelled to stop workers; issue a fresh one
-                    // linked to the caller's token for the single-stream phase.
-                    if (_fallbackSingleStream && TakeFault() == null && !cancellationToken.IsCancellationRequested)
-                    {
-                        using (var trunc = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite)) { }
-                        Interlocked.Exchange(ref _totalDownloaded, 0);
-                        try { _internalCts?.Dispose(); } catch { }
-                        _internalCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                        await SingleStreamDownload(url, outputPath, cancellationToken);
-                        SetState(DownloadState.Completed);
-                        _currentResolvedFileName = resolvedFileName;
-                        try { if (File.Exists(metaPath)) File.Delete(metaPath); } catch { }
-                        return outputPath;
-                    }
-
-                    // Explicit completion gate (F-12): Completed requires ALL of:
-                    // no fault, no cancellation, exact range coverage, exact byte
-                    // accounting, and exact on-disk length. No file reread needed.
-                    if (workerCts.Token.IsCancellationRequested && TakeFault() == null)
-                    {
-                        // Cancelled (F-13): never report Completed, never return a path.
-                        SetState(DownloadState.Cancelled);
-                        try { if (File.Exists(metaPath)) File.Delete(metaPath); } catch { }
-                        throw new OperationCanceledException(workerCts.Token);
-                    }
-
-                    var fault = TakeFault();
-                    if (fault != null)
-                    {
-                        SetState(DownloadState.Failed, fault.Message);
-                        try { if (File.Exists(metaPath)) File.Delete(metaPath); } catch { }
-                        ExceptionDispatchInfo.Capture(fault).Throw();
-                    }
-
-                    long accounted = Interlocked.Read(ref _totalDownloaded);
-                    long onDisk = -1;
-                    Exception? gateError = null;
-                    try { onDisk = new FileInfo(outputPath).Length; } catch (Exception ex) { gateError = ex; }
-
-                    if (!tracker.IsComplete || accounted != totalSize || onDisk != totalSize)
-                    {
-                        var msg = $"Completion gate rejected download: range coverage {tracker.CoveredBytes}/{totalSize} bytes, " +
-                            $"accounted {accounted}/{totalSize} bytes, on-disk {onDisk}/{totalSize} bytes." +
-                            (gateError != null ? $" File check error: {gateError.Message}" : string.Empty);
-                        var gateFault = new DownloadFailedException(msg);
-                        SetState(DownloadState.Failed, msg);
-                        try { if (File.Exists(metaPath)) File.Delete(metaPath); } catch { }
-                        throw gateFault;
-                    }
-
-                    // All gate conditions satisfied: enter Completed and report.
-                    SetState(DownloadState.Completed);
-                    _currentResolvedFileName = resolvedFileName;
-                    try { if (File.Exists(metaPath)) File.Delete(metaPath); } catch { }
-                }
-                finally
-                {
-                    // always stop and dispose timer used for reporting
-                    lock (_timerLock)
-                    {
-                        try { _reportTimer?.Dispose(); } catch { }
-                        _reportTimer = null;
-                    }
-                }
-            }
-
-            return outputPath;
-        }
-
-        /// <summary>
-        /// Strict per-chunk transfer (F-01): identity encoding, 206 + Content-Range
-        /// validation against the REQUESTED span, exact byte completion, bounded
-        /// remainder-resume. Throws on cancellation (OCE), RangeNotSupportedException
-        /// for 200-to-range (fallback), DownloadFailedException for fatal faults.
-        /// Transient stalls resume the unwritten remainder; attempts without forward
-        /// progress are bounded by RetryPolicy (final reason recorded).
-        /// </summary>
-        private async Task DownloadChunkStrictAsync(
-            string url, (long start, long end) chunk, SafeFileHandle handle,
-            long totalSize, string? sessionETag, DateTimeOffset? sessionLastModified,
-            RangeTracker tracker, CancellationToken sessionCt)
-        {
-            long origStart = chunk.start, origEnd = chunk.end;
-            var policy = RetryPolicy ?? DownloadRetryPolicy.Default;
-            int consecutiveFailures = 0;
-            try { _activeChunks[origStart] = origEnd; } catch { }
-
-            var buffer = ArrayPool<byte>.Shared.Rent(256 * 1024);
+            StartReporting(totalSize, resolvedFileName ?? safeName);
             try
             {
-                while (true)
-                {
-                    sessionCt.ThrowIfCancellationRequested();
-                    _pauseToken.WaitIfPaused(sessionCt);
-
-                    long reqStart = chunk.start, reqEnd = chunk.end;
-                    long expected = reqEnd - reqStart + 1;
-                    long writtenThisAttempt = 0;
-                    TimeSpan? attemptRetryAfter = null;
-                    CancellationTokenSource? perReq = null;
-                    try
-                    {
-                        perReq = CancellationTokenSource.CreateLinkedTokenSource(sessionCt);
-                        // AddOrUpdate (not TryAdd): retries reuse keys and Pause() must
-                        // always reach the live request (refines P-01).
-                        try { _activeRequestCts.AddOrUpdate(reqStart, perReq, (_, _) => perReq); } catch { }
-
-                        using var req = new HttpRequestMessage(HttpMethod.Get, url);
-                        req.Headers.Range = new RangeHeaderValue(reqStart, reqEnd);
-                        // Identity transfer encoding for ranges: byte offsets must keep
-                        // their meaning regardless of server compression support (F-08).
-                        req.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
-                        using var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, perReq.Token);
-
-                        int code = (int)resp.StatusCode;
-                        if (resp.StatusCode == HttpStatusCode.OK)
-                            throw new RangeNotSupportedException($"Server answered 200 to range [{reqStart}-{reqEnd}]; ranges unsupported.");
-                        if (resp.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
-                            throw new NonRetryableHttpException($"Server rejected range [{reqStart}-{reqEnd}] with 416.");
-                        if (IsRetryableStatus(code))
-                        {
-                            attemptRetryAfter = GetRetryAfterDelay(resp);
-                            throw new HttpRequestException($"HTTP {code} ({resp.StatusCode}) for range [{reqStart}-{reqEnd}].");
-                        }
-                        if (code >= 400 && code < 500)
-                            throw new NonRetryableHttpException($"HTTP {code} ({resp.StatusCode}) for range [{reqStart}-{reqEnd}].");
-
-                        ValidateRangeResponse(resp, reqStart, reqEnd, totalSize, sessionETag, sessionLastModified);
-
-                        try { if (GetState() == DownloadState.Retrying) SetState(DownloadState.Downloading); } catch { }
-
-                        using var stream = await resp.Content.ReadAsStreamAsync(perReq.Token);
-                        long written = 0;
-                        while (true)
-                        {
-                            sessionCt.ThrowIfCancellationRequested();
-                            _pauseToken.WaitIfPaused(sessionCt);
-                            int read;
-                            try
-                            {
-                                // Single WaitAsync timeout instead of a linked CTS per
-                                // read: TimeoutException = stall, OCE = pause/cancel.
-                                read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), perReq.Token).AsTask()
-                                    .WaitAsync(TimeSpan.FromSeconds(30), perReq.Token);
-                            }
-                            catch (TimeoutException ex)
-                            {
-                                throw new IncompleteChunkException($"Range [{reqStart}-{reqEnd}]: read stalled after {written} of {expected} bytes ({ex.Message}).");
-                            }
-
-                            if (read <= 0)
-                            {
-                                // Strict completion (F-01): clean EOF counts only when
-                                // every expected byte arrived; otherwise resume remainder.
-                                if (written >= expected) break;
-                                throw new IncompleteChunkException($"Range [{reqStart}-{reqEnd}]: clean EOF after {written} of {expected} bytes.");
-                            }
-
-                            long remaining = expected - written;
-                            int bytesToWrite = remaining > 0 ? (int)Math.Min(read, remaining) : read;
-                            await RandomAccess.WriteAsync(handle, new ReadOnlyMemory<byte>(buffer, 0, bytesToWrite), reqStart + written, sessionCt);
-                            written += bytesToWrite;
-                            Interlocked.Add(ref _totalDownloaded, bytesToWrite);
-                            writtenThisAttempt += bytesToWrite;
-                            if (written >= expected) break;
-                        }
-
-                        // Full remainder received and written: exact coverage, no duplicates.
-                        tracker.CompleteRange(origStart, origEnd);
-                        try { _activeChunks.TryRemove(origStart, out _); } catch { }
-                        try { _activeChunks.TryRemove(reqStart, out _); } catch { }
-                        return;
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        if (sessionCt.IsCancellationRequested) throw;
-                        if (_pauseToken.IsPaused) break; // Pause(): outer loop waits; Pause() requeues remainder
-                        // Per-request abort with no pause/cancel signal: transient stall.
-                        throw new IOException("In-flight range request aborted without pause or cancellation.");
-                    }
-                    catch (Exception ex) when (IsTransientNetworkError(ex))
-                    {
-                        if (writtenThisAttempt > 0)
-                        {
-                            // Forward progress: advance to the unwritten remainder and
-                            // resume immediately; the no-progress streak resets.
-                            long newStart = chunk.start + writtenThisAttempt;
-                            try { _activeChunks.TryRemove(reqStart, out _); } catch { }
-                            try { _activeChunks.TryRemove(chunk.start, out _); } catch { }
-                            chunk.start = newStart;
-                            try { _activeChunks[newStart] = origEnd; } catch { }
-                            consecutiveFailures = 0;
-                            SetState(DownloadState.Retrying, "Resuming range...");
-                            continue;
-                        }
-                        consecutiveFailures++;
-                        if (consecutiveFailures >= policy.MaxAttempts)
-                        {
-                            throw new DownloadFailedException(
-                                $"Range [{origStart}-{origEnd}] failed after {consecutiveFailures} attempts without progress. " +
-                                $"Last error: {ex.GetType().Name}: {ex.Message}", ex);
-                        }
-                        SetState(DownloadState.Retrying, "Network Lost - Reconnecting...");
-                        var delay = policy.ComputeDelay(consecutiveFailures, attemptRetryAfter);
-                        await Task.Delay(delay, sessionCt); // cancellable: no ContinueWith suppression
-                        continue;
-                    }
-                    finally
-                    {
-                        try { _activeRequestCts.TryRemove(reqStart, out _); } catch { }
-                        try { perReq?.Dispose(); } catch { }
-                    }
-                }
+                return await session.RunAsync();
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                StopReporting();
+                try { session.Dispose(); } catch { }
             }
         }
+
 
         /// <summary>
         /// Strict HTTP range-response validation (§4). Rejects before any body byte
@@ -1059,7 +739,7 @@ namespace DRRipper
         /// span and session total, and stable resource identity. Never trusts
         /// Content-Length for offsets. Throws NonRetryableHttpException (fatal).
         /// </summary>
-        private static void ValidateRangeResponse(
+        internal static void ValidateRangeResponse(
             HttpResponseMessage resp, long reqStart, long reqEnd, long totalSize,
             string? sessionETag, DateTimeOffset? sessionLastModified)
         {
@@ -1091,191 +771,6 @@ namespace DRRipper
                     $"Resource identity changed mid-download (Last-Modified '{sessionLastModified}' -> '{lm}'); refusing to mix versions.");
         }
 
-        private async Task SingleStreamDownload(string url, string outputPath, CancellationToken cancellationToken)
-        {
-            var progress = new DownloadProgress { StatusMessage = "Downloading" };
-            // reset global counters for this single-stream download and start reporter
-            Interlocked.Exchange(ref _totalDownloaded, 0);
-            Interlocked.Exchange(ref _reportBytes, 0);
-            lock (_reportLock) { _reportTime = DateTime.MinValue; }
-            SetState(DownloadState.Downloading, "Downloading");
-            _currentResolvedFileName = Path.GetFileName(outputPath);
-            lock (_timerLock)
-            {
-                _lastReportBytes = Interlocked.Read(ref _totalDownloaded);
-                _lastReportTime = DateTime.UtcNow;
-                _smoothedSpeed = 0.0;
-                _reportTimer = new System.Threading.Timer(ReportTimerTick, null, 250, 250);
-            }
-
-            // Unify cancellation: observe the external token AND application Cancel().
-            using var sessionCts = _internalCts != null
-                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _internalCts.Token)
-                : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var sessionCt = sessionCts.Token;
-            var policy = RetryPolicy ?? DownloadRetryPolicy.Default;
-
-            Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? ".");
-
-            try
-            {
-                using (var fs = new FileStream(outputPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite, 64 * 1024, FileOptions.Asynchronous))
-                {
-                    var handle = fs.SafeFileHandle;
-                    long writeOffset = 0;
-                    long? expectedTotal = null;
-                    int consecutiveFailures = 0;
-
-                    while (true)
-                    {
-                        sessionCt.ThrowIfCancellationRequested();
-                        _pauseToken.WaitIfPaused(sessionCt);
-                        long writtenThisAttempt = 0;
-                        TimeSpan? attemptRetryAfter = null;
-
-                        CancellationTokenSource? perReq = null;
-                        try
-                        {
-                            perReq = CancellationTokenSource.CreateLinkedTokenSource(sessionCt);
-                            try { _activeRequestCts.AddOrUpdate(-1, perReq, (_, _) => perReq); } catch { }
-
-                            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-                            if (writeOffset > 0)
-                                req.Headers.Range = new RangeHeaderValue(writeOffset, null);
-
-                            using var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, perReq.Token);
-                            int sc = (int)resp.StatusCode;
-
-                            if (writeOffset > 0 && resp.StatusCode != HttpStatusCode.PartialContent)
-                                throw new NonRetryableHttpException(
-                                    $"Server does not support resume at offset {writeOffset} (got {(int)resp.StatusCode} {resp.StatusCode}); cannot continue without retransmission.");
-                            if (IsRetryableStatus(sc))
-                            {
-                                attemptRetryAfter = GetRetryAfterDelay(resp);
-                                throw new HttpRequestException($"HTTP {sc} ({resp.StatusCode}) for single-stream download.");
-                            }
-                            if (sc >= 400 && sc < 500)
-                                throw new NonRetryableHttpException($"HTTP {sc} ({resp.StatusCode}) for single-stream download.");
-                            resp.EnsureSuccessStatusCode();
-
-                            // Adopt the total once; any later disagreement is a fatal identity change.
-                            long? reported = resp.Content.Headers.ContentRange?.Length ?? resp.Content.Headers.ContentLength;
-                            if (writeOffset == 0 && reported.HasValue)
-                                expectedTotal = reported.Value;
-                            else if (reported.HasValue && expectedTotal.HasValue && reported.Value != expectedTotal.Value)
-                                throw new NonRetryableHttpException(
-                                    $"Server total changed mid-download ({expectedTotal} -> {reported}); refusing to mix versions.");
-                            else if (reported.HasValue)
-                                expectedTotal ??= reported.Value;
-
-                            if (writeOffset > 0)
-                            {
-                                var rcr = resp.Content.Headers.ContentRange;
-                                if (rcr != null && rcr.HasRange && rcr.From != writeOffset)
-                                    throw new NonRetryableHttpException(
-                                        $"Resume range mismatch: requested from {writeOffset}, server sent from {rcr.From}.");
-                            }
-
-                            try { if (GetState() == DownloadState.Retrying) SetState(DownloadState.Downloading); } catch { }
-                            progress.TotalBytes = expectedTotal ?? -1;
-                            try { _currentTotalSize = expectedTotal ?? -1; } catch { }
-
-                            using var stream = await resp.Content.ReadAsStreamAsync(perReq.Token);
-                            var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
-                            try
-                            {
-                                while (true)
-                                {
-                                    sessionCt.ThrowIfCancellationRequested();
-                                    _pauseToken.WaitIfPaused(sessionCt);
-                                    int read;
-                                    try
-                                    {
-                                        read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), perReq.Token).AsTask()
-                                            .WaitAsync(TimeSpan.FromSeconds(45), perReq.Token);
-                                    }
-                                    catch (TimeoutException ex)
-                                    {
-                                        throw new IncompleteChunkException($"Single-stream read stalled at offset {writeOffset} ({ex.Message}).");
-                                    }
-                                    if (read <= 0) break;
-
-                                    await System.IO.RandomAccess.WriteAsync(handle, new ReadOnlyMemory<byte>(buffer, 0, read), writeOffset, sessionCt);
-                                    writeOffset += read;
-                                    writtenThisAttempt += read;
-                                    Interlocked.Add(ref _totalDownloaded, read);
-                                }
-                            }
-                            finally { ArrayPool<byte>.Shared.Return(buffer); }
-
-                            // Stream ended. With a known total, a shortfall is an
-                            // incomplete transfer -> resume remainder (never false success).
-                            if (expectedTotal.HasValue && writeOffset < expectedTotal.Value)
-                            {
-                                consecutiveFailures = 0; // progress was made; resume immediately
-                                SetState(DownloadState.Retrying, "Resuming stream...");
-                                continue;
-                            }
-
-                            SetState(DownloadState.Completed);
-                            _currentResolvedFileName = Path.GetFileName(outputPath);
-                            return;
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            // External Cancel(), linked internal cancel, or Dispose:
-                            // propagate so callers observe cancellation, never Completed.
-                            if (sessionCt.IsCancellationRequested) throw;
-                            if (_pauseToken.IsPaused) { _pauseToken.WaitIfPaused(sessionCt); continue; }
-                            throw new IOException("In-flight single-stream request aborted without pause or cancellation.");
-                        }
-                        catch (Exception ex) when (IsTransientNetworkError(ex))
-                        {
-                            if (writtenThisAttempt > 0)
-                            {
-                                consecutiveFailures = 0;
-                                SetState(DownloadState.Retrying, "Resuming stream...");
-                                continue;
-                            }
-                            consecutiveFailures++;
-                            if (consecutiveFailures >= policy.MaxAttempts)
-                            {
-                                var done = new DownloadFailedException(
-                                    $"Single-stream download failed after {consecutiveFailures} attempts without progress at offset {writeOffset}. " +
-                                    $"Last error: {ex.GetType().Name}: {ex.Message}", ex);
-                                SetState(DownloadState.Failed, done.Message);
-                                throw done;
-                            }
-                            SetState(DownloadState.Retrying, "Network Lost - Reconnecting...");
-                            await Task.Delay(policy.ComputeDelay(consecutiveFailures, attemptRetryAfter), sessionCt);
-                            continue;
-                        }
-                        finally { try { _activeRequestCts.TryRemove(-1, out _); } catch { } try { perReq?.Dispose(); } catch { } }
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Terminal state mapping for external/linking cancellation (F-13):
-                // never leave a stale Downloading behind; never report Completed.
-                SetState(DownloadState.Cancelled);
-                throw;
-            }
-            catch (DownloadFailedException ex)
-            {
-                SetState(DownloadState.Failed, ex.Message);
-                throw;
-            }
-            finally
-            {
-                // stop and dispose timer used for single-stream
-                lock (_timerLock)
-                {
-                    try { _reportTimer?.Dispose(); } catch { }
-                    _reportTimer = null;
-                }
-            }
-        }
 
         private static string? ResolveFileNameFromResponse(HttpResponseMessage resp, string? suggested)
         {
@@ -1327,23 +822,9 @@ namespace DRRipper
             };
         }
 
-        // Exception used to indicate a non-retryable 4xx HTTP error
-        private class NonRetryableHttpException : DownloadFailedException
-        {
-            public NonRetryableHttpException(string message) : base(message) { }
-        }
-
-        /// <summary>Signals that a range request was answered 200: restart as single-stream.</summary>
-        private sealed class RangeNotSupportedException : Exception
-        {
-            public RangeNotSupportedException(string message) : base(message) { }
-        }
-
-        /// <summary>Signals a short clean-EOF chunk that must resume its remainder (transient).</summary>
-        private sealed class IncompleteChunkException : IOException
-        {
-            public IncompleteChunkException(string message) : base(message) { }
-        }
+        // Shared engine exception taxonomy lives at namespace level in
+        // DownloadSession.cs (internal): NonRetryableHttpException,
+        // RangeNotSupportedException, IncompleteChunkException.
 
         private static bool IsRetryableStatus(int statusCode) => statusCode switch
         {
@@ -1371,7 +852,7 @@ namespace DRRipper
             };
         }
 
-        private static bool IsTransientNetworkError(Exception ex) => ex switch
+        internal static bool IsTransientNetworkError(Exception ex) => ex switch
         {
             OperationCanceledException => false, // cancellation is never "transient"
             DownloadFailedException => false,    // already classified (fatal or wrapped)
@@ -1384,7 +865,7 @@ namespace DRRipper
             _ => false,
         };
 
-        private static TimeSpan? GetRetryAfterDelay(HttpResponseMessage resp)
+        internal static TimeSpan? GetRetryAfterDelay(HttpResponseMessage resp)
         {
             try
             {
@@ -1401,15 +882,19 @@ namespace DRRipper
             return null;
         }
 
-        private void RecordFault(Exception ex)
-        {
-            lock (_faultLock) { _sessionFault ??= ex; }
-            try { _internalCts?.Cancel(); } catch { }
-        }
+        // Per-run fault propagation moved to DownloadSession (Ticket #004).
 
-        private Exception? TakeFault()
+        internal void SetResolvedFileName(string name) => _currentResolvedFileName = name;
+
+        /// <summary>Last pause-phase latencies in ms (sem, ack, checkpoint). Test/diagnostics only.</summary>
+        internal (long SemMs, long AckMs, long CheckpointMs) GetPauseTelemetry()
         {
-            lock (_faultLock) return _sessionFault;
+            lock (_sessionLock)
+            {
+                var s = _session;
+                if (s == null) return (-1, -1, -1);
+                return (s.PauseSemMs, s.PauseAckMs, s.PauseCheckpointMs);
+            }
         }
     }
 }

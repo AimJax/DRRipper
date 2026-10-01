@@ -65,6 +65,29 @@ public sealed class DownloadFixture : IAsyncDisposable
             $"{context}: SHA-256 mismatch. expected={expectedHex} actual={actual} file={path}");
     }
 
+    /// <summary>Recovery metadata path for a fixture's download.</summary>
+    public static string PartMetaPath(DownloadFixture fx) =>
+        Path.Combine(fx.TempDir, fx.Server.Profile.FileName + ".part.drmeta");
+
+    /// <summary>Parses "bytes=S-E" (open-ended E defaults to size-1).</summary>
+    public static (long S, long E) ParseRangeHeader(string header, long size)
+    {
+        var spec = header[(header.IndexOf('=') + 1)..];
+        var parts = spec.Split('-');
+        long s = long.Parse(parts[0]);
+        long e = parts[1].Length == 0 ? size - 1 : long.Parse(parts[1]);
+        return (s, e);
+    }
+
+    /// <summary>Reads the persisted prefix offset from a v2 metadata file.</summary>
+    public static long ReadPrefixOffset(string metaPath)
+    {
+        string json = File.ReadAllText(metaPath);
+        var m = System.Text.RegularExpressions.Regex.Match(json, "\"PrefixOffset\":(\\d+)");
+        Assert.True(m.Success, $"No PrefixOffset in metadata at {metaPath}.");
+        return long.Parse(m.Groups[1].Value);
+    }
+
     /// <summary>
     /// Cancellation surfaces as OperationCanceledException or a derived type
     /// (e.g. TaskCanceledException from HttpClient). Assert the family.
@@ -115,8 +138,7 @@ public sealed class DownloadFixture : IAsyncDisposable
 
 /// <summary>Range-coverage analysis over the server request log.</summary>
 public static class RangeLogAnalysis
-{
-    public sealed record Span(long Start, long End);
+{    public sealed record Span(long Start, long End);
 
     public static List<Span> SuccessfulRanges(TestDownloadServer server)
     {

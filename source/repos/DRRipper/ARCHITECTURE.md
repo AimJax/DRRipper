@@ -92,4 +92,57 @@ Ticket #003 kept the direct-offset, preallocated, chunk-queue architecture and c
 - **Single-stream (§10):** same retry taxonomy, resume-mismatch and mid-run total-change fail fast, final length verified when the size is known, EOF shortfall resumes (offset persists; the old byte-rollback was removed as accounting is now append-only).
 - **Test server (§11):** bounded-memory streaming (64 KB pooled buffers, incremental generation, streaming gzip) replaced full-body materialization; new knobs: `Respond200ToRanges`, `ContentRangeOverride`, `RetryAfterSeconds`, identity switching after N requests. All prior profiles preserved.
 
+## 10. Post-Ticket #004 architecture deltas (2026-10-01)
+
+Ticket #004 kept the direct-offset architecture and moved all per-run mutable
+state into `DownloadSession` (one object per `StartAsync` call; the shared
+`HttpClient`/handler is borrowed, never owned). `ParallelDownloader` is now a
+facade: probing, filename resolution, progress reporting, and lifecycle
+delegation. No segment files, no concatenation, no database, no scheduler, no
+UI redesign, no adaptive concurrency.
+
+- **Sessions (§3):** each session owns URL/paths/validators, segment map,
+  `RangeTracker` coverage, active-remainder map, request map, attempt slots,
+  pause token + generation, session CTS, retry policy, checkpoint settings and
+  telemetry. Cross-file contamination (F-06) is structurally impossible.
+- **Recovery metadata v2 (§4):** `{SchemaVersion:2, Url, ResolvedUrl,
+  FinalFileName, TotalSize, ETag, LastModified, SegmentSize, Mode,
+  CompletedRanges (merged), PrefixOffset, CheckpointUtc, Checksum}` with
+  SHA-256 over the canonical payload, atomic tmp+flush+move replacement,
+  throttled checkpoints (default 2 s, always on pause/final), bounded budgets
+  (transfer 5 s, pause 15 s, finalize 120 s) so wedged storage degrades instead
+  of hanging. Only verified coverage is ever persisted, after `FlushFileBuffers`.
+- **Non-destructive recovery (§5):** metadata loads and validates BEFORE any
+  truncating open; resume reuses the existing `.part` (Open, never Create);
+  fresh runs preallocate; filename collisions produce unique names (never
+  silent overwrites). Crash-during-finalize adopts the completed final file.
+- **Identity (§6):** strong-ETag match preferred; weak ETags require
+  Last-Modified agreement; no validators on either side means full restart
+  (conservative). First post-recovery request carries `If-Range`; 200/412/416
+  triggers clean full restart. Mid-run switching still rejected.
+- **Range accounting (§7):** queue entries carry `(Start, End, CreditStart)` so
+  pause-split chunks credit their full logical span on success (no recount, no
+  orphaned prefix). Drops self-requeue exactly once by the owning worker;
+  `Pause()` never requeues (eliminates the duplicate class entirely).
+- **Read lifecycle (§8):** every pending read is settled (5 s grace) before its
+  buffer is reused; unsettled buffers are abandoned (rented fresh, 256 KB cap),
+  never returned early. Per-read allocation is one `WaitAsync` timer, down from
+  two linked CTS objects.
+- **Pause machine (§9):** internal phases (Probing/Downloading/Pausing/Paused/
+  Verifying/Terminal) mapped onto the unchanged public `DownloadState` enum.
+  Pause parks via token + request-abort, waits bounded acknowledgement that only
+  counts genuinely in-flight attempts (parking never holds slots), then
+  checkpoints. Resume validates + unparks. Cancel preempts everything and drops
+  partials; Teardown (Dispose) preserves them. Gate/finalize/resume run under
+  the pause semaphore with completion early-outs and no-stomp guards, so rapid
+  cycles and completion races resolve benignly in every order.
+- **Single-stream (§11):** prefix mode with persisted offset, If-Range resume on
+  range servers, safe full restart otherwise (truncate-first, never stale tail,
+  never false reuse claims).
+- **Finalization (§12):** gate → flush → close → same-volume rename (collision
+  retried with unique names) → metadata delete. No copy, no rebuild, no
+  mandatory hashing. SHA-256 remains test-fixture-only.
+- **Test server (§11):** added `StallAfterBytes` (clean read-timeout probe),
+  `RemotePort` attribution, `BoundPort` (same-port server restart tests).
+
 *End of ARCHITECTURE.md.*

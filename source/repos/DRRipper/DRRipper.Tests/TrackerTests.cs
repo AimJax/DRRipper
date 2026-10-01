@@ -84,19 +84,25 @@ public sealed class TrackerAndClassifierTests
             new HResultIOException(unchecked((int)0x80070020), "sharing violation")));
     }
 
-    [Fact] // N (integration): a filesystem error at open fails fast within the deadline.
+    [Fact] // N (integration): a locked destination is never overwritten; the run
     public async Task N_LockedDestination_Fails_Fast()
     {
         await using var fx = await DownloadFixture.CreateAsync(
             new DRRipper.TestServer.ServerProfile { FileSize = 4L * 1024 * 1024 });
-        // Hold the resolved destination path open with no sharing: preallocation must fail now, not hang.
+        // Hold the resolved destination path open with no sharing: the engine must
+        // route around it (unique name) instead of overwriting or hanging.
         string lockedPath = Path.Combine(fx.TempDir, fx.Server.Profile.FileName);
         using var lockStream = new FileStream(lockedPath, FileMode.Create, FileAccess.Write, FileShare.None);
         using var dl = new ParallelDownloader();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        await Assert.ThrowsAsync<IOException>(() => dl.StartAsync(fx.Url, fx.TempDir, 2, cts.Token));
+        string final = await dl.StartAsync(fx.Url, fx.TempDir, 2, cts.Token);
         sw.Stop();
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(30), "Filesystem failure was retried instead of failing fast.");
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(30), "Filesystem conflict was retried instead of routed around.");
+        Assert.True(!string.Equals(
+            Path.GetFullPath(lockedPath), Path.GetFullPath(final), StringComparison.OrdinalIgnoreCase),
+            "Engine overwrote a locked unrelated file.");
+        fx.AssertFileHash(final, fx.ExpectedHash, "N_LockedDestination content");
+        Assert.Equal(0, new FileInfo(lockedPath).Length);
     }
 }

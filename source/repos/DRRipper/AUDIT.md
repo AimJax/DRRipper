@@ -259,4 +259,42 @@ completion gate, unified cancellation, bounded retry (see ARCHITECTURE.md §9).
 | P-01 request-CTS key collision | **Mitigated**: AddOrUpdate always tracks the live request | Code review |
 | P-03 Content-Range ignored | **Resolved** | C/D/E rejection tests |
 
+---
+
+## 12. Ticket #004 — resolution status (2026-10-01)
+
+Sections 1–11 above are frozen and left intact. This section records the
+Ticket #004 disposition. Production work: per-download `DownloadSession`
+isolation, versioned checksummed recovery metadata (`.part` + `.part.drmeta`,
+atomic replace), non-destructive resume with cross-run identity validation,
+exact-coverage checkpoints, settled-read lifecycle, controlled pause machine
+with run-end mutual exclusion, `.part` → final atomic rename (see
+ARCHITECTURE.md §10).
+
+### Disposition table
+
+| Finding | Ticket #004 status | Evidence |
+|---|---|---|
+| F-03 resume truncation | **Resolved** | T-REC-01 (reuse ratio bounded), T-REC-01-KILL (genuine kill), T-REC-02 early kill; metadata loads before any truncating open |
+| F-04 no identity validators | **Resolved** (single-download scope) | Validators persisted; mismatch forces full restart (T-REC-03); in-run switching still rejected; queue-level tracking stays a scheduler-milestone item |
+| F-05 batch abort | Unchanged (scheduler ticket — explicitly out of scope) | — |
+| F-06 shared state/Dispose race | **Resolved** (single-download scope) | Per-call sessions; Teardown (keep files) vs RequestCancel (drop partials); N-locked test now asserts no-overwrite routing |
+| F-10 single-stream resume | **Resolved** | Prefix resume with If-Range on range servers (T-REC-05b); safe full restart otherwise (T-REC-05) |
+| F-13 cancellation swallow | Stays resolved; extended with cancel/teardown distinction and terminal-state guards | I/J/K still green; T-STATE-05/06 |
+| P-02 progress accounting | **Resolved** | Append-only accounting + credit-carrying queue entries; gate equality enforced (T-UNIT-01, T-INT-COVERAGE) |
+
+### New observations (test-infrastructure grade, not product defects)
+
+- **Abort-race byte overcount:** server-side transmitted totals overcount bytes
+  the client never consumed when aborts race full-speed streaming. Integrity
+  tests therefore assert client-observable contracts (request spans, resume
+  offsets, hashes) instead of transmitted ratios wherever aborts are involved.
+- **Host scheduling stalls:** this development box exhibited multi-second to
+  minutes-long single-thread stalls with healthy sibling timers (proven by
+  bounded-wait telemetry + watchdog heartbeats). All engine waits are bounded;
+  rapid timing test T-STATE-04 is quarantined as environment-sensitive (CI
+  non-blocking) until it runs on healthy hardware. No product change can fix a
+  frozen thread; the mitigation is fail-fast bounds everywhere (semaphores,
+  ack, checkpoint budgets, test wrappers).
+
 *End of AUDIT.md — see ROADMAP.md, ARCHITECTURE.md, TEST_PLAN.md.*

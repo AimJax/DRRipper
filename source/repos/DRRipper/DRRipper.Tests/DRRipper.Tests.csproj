@@ -22,6 +22,16 @@
   <ItemGroup>
     <ProjectReference Include="..\DRRipper\DRRipper.csproj" />
     <ProjectReference Include="..\DRRipper.TestServer\DRRipper.TestServer.csproj" />
+    <ProjectReference Include="..\DRRipper.RecoveryDriver\DRRipper.RecoveryDriver.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <!-- Stage the kill-test driver next to the test assembly (Ticket #004 §13). -->
+  <Target Name="CopyRecoveryDriver" AfterTargets="Build">
+    <MSBuild Projects="..\DRRipper.RecoveryDriver\DRRipper.RecoveryDriver.csproj" Targets="Build" Properties="Configuration=$(Configuration)" />
+    <ItemGroup>
+      <DriverFiles Include="..\DRRipper.RecoveryDriver\bin\$(Configuration)\net10.0-windows\DRRipper.RecoveryDriver.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(DriverFiles)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

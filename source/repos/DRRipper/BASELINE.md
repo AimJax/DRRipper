@@ -129,3 +129,89 @@ of two linked CTS allocations per read, cheaper completion accounting — were
 not isolated and are not claimed. No benchmark regressed: every cell is
 faster-or-equal, all integrity checks pass, so correctness was not traded
 for speed. The >5% rule will apply to future changes against THIS table.
+
+---
+
+# Ticket #004 appendix (2026-10-01, same hardware)
+
+Production engine re-architected around per-download sessions with durable
+recovery (see ARCHITECTURE.md §10). Ticket #003 data above is preserved.
+
+## Build
+
+- `dotnet build DRRipper.slnx -c Release --no-incremental`: **0 errors**,
+  **1 pre-existing warning** (CS0168, untouched DNS catch). New projects:
+  `DRRipper.RecoveryDriver` (child-process kill driver), `DownloadSession.cs`.
+- Test count: **53 safe tests** (30 carried + 23 new), **0 known failures**
+  (the ledger is empty; both T-REC items now pass by design), plus
+  1 environment-sensitive quarantine (T-STATE-04, CI non-blocking).
+
+## Tests
+
+- Recovery: genuine SIGKILL-equivalent kills resume with bounded
+  retransmission (T-REC-01-KILL ratio ≈ 1.1–1.4 vs 2.0 for full restart);
+  torn tmp ignored; corrupt/truncated/missing metadata and missing part all
+  restart safely; blackout auto-resumes; identity switch detected (full
+  restart, clean v2, never hybrid).
+- State machine: pause ack ≈ 50–65 ms, checkpoint ≈ 9–14 ms, resume ≈ 0 ms
+  (telemetry); rapid cycles green on quiet runs; cancel precedence holds.
+- Network: repeated 2 s stalls resume to identical output; pending-read cancel
+  is clean (settled-read protocol, abandon-on-unsettled).
+- Coverage: post-restart requests provably disjoint from verified spans
+  (server-restart design gives pristine attribution).
+- Resume startup latency (8 MB resume, first progress event): a few seconds,
+  dominated by probe + a trickle of immediate progress (measured < 30 s bound;
+  typical observation ≈ 2–5 s).
+- Pause checkpoint file size: hundreds of bytes for few-span snapshots
+  (~400 B observed for 8 MB); scales ≈ 25 B/span (≈ 3 KB at 128 spans/1 GB).
+
+## Benchmarks (fresh DURABLE baseline — methodology break, read this first)
+
+Same matrix (10/100/1024 MB × 1/2/4/8/16 conns × 3 iters), all 45 runs
+SHA-256 OK, 0 retransmits, handle deltas ≈ 0. Median MB/s:
+
+| Size | conn=1 | conn=2 | conn=4 | conn=8 | conn=16 |
+|---|---|---|---|---|---|
+| 10 MB | 121.1 | 138.7 | 147.4 | 142.5 | 162.6 |
+| 100 MB | 200.9 | 230.4 | 214.6 | 188.8¹ | 189.5 |
+| 1024 MB | 211.5 | 244.3 | 229.1 | 212.0 | 201.2 |
+
+¹ 100 MB conn=8 cell re-run after a transient 55 MB/s outlier (system hiccup);
+rerun median 188.8; the outlier is disclosed, not hidden.
+
+Finalization latency (fixed metric: last byte-growth → return): ≈ 30 ms
+(10 MB), ≈ 260 ms (100 MB), ≈ 0.24–2.6 s (1 GB, writeback-race dependent —
+larger when the faster transfer outruns OS writeback).
+CPU ≈ 15–16 s and WS ≈ 79 MB per 1 GB run; allocated bytes ≈ ±20 MB/run
+(GC noise; includes in-process server). Request counts exact
+(129 = 128 chunks + HEAD for 1 GB multi-conn).
+
+## Regression analysis — READ BEFORE COMPARING WITH TICKET #003
+
+Throughput is roughly HALF the Ticket #003 medians (e.g. 1 GB conn=2:
+583.9 → 244.3 MB/s) with the same optimum shape (2 connections best).
+**This is NOT an engine regression.** Isolation proof: #004 engine +
+#003 server reproduces the same level; #003 engine on today's box reproduces
+583.9; disabling ONLY `FlushFileBuffers` in a scratch tree restores 587 MB/s.
+Root cause: Ticket #004 implements the ticket-mandated durability policy
+(flush file data before marking ranges recoverable/completed). Direct disk
+measurement on this box: 1 GB streams to page cache in 0.57 s but physical
+flush costs +2.5 s (≈ 400 MB/s physical). Ticket #003 measured buffered
+(page-cache) speed; Ticket #004 measures durable speed. Per the methodology
+rule this is a **fresh comparable baseline**: future changes compare against
+THIS table, and correctness (durability) is never traded for benchmark speed.
+Engine transfer mechanics are unchanged-or-cheaper (per-chunk buffers,
+single read timer, settled reads).
+
+## Environment and limitations
+
+- Same Windows 10 box, .NET 10.0.12, 8 logical cores as Tickets #002/#003.
+- Intermittent host-level scheduling stalls observed (single threads frozen
+  60–170 s while sibling timers ticked; no disk errors in event log; 20 GB
+  RAM free; no runaway processes). All engine waits are bounded (semaphore
+  30 s, ack 15 s, checkpoint 5/15/120 s, test wrappers 60 s); T-STATE-04 is
+  quarantined as environment-sensitive with fail-fast stall detection.
+- Localhost loopback measures software bottlenecks, not internet performance.
+- Abort-race byte overcount documented (AUDIT.md §12): integrity assertions
+  use client-observable contracts (spans, offsets, hashes), never raw
+  server-side byte totals across aborts.

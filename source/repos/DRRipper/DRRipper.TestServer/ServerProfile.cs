@@ -11,7 +11,8 @@ public sealed record RequestRecord(
     string? RangeHeader,
     int StatusCode,
     long BytesWritten,
-    string ConnectionId);
+    string ConnectionId,
+    int RemotePort = 0);
 
 /// <summary>
 /// Mutable behaviour profile. Tests mutate this in-process between runs
@@ -47,6 +48,12 @@ public sealed class ServerProfile
 
     /// <summary>Pace body writes to this many bytes/second. Null = unthrottled.</summary>
     public long? BytesPerSecond { get; set; }
+
+    /// <summary>
+    /// Per response, stop sending after this many body bytes and stall forever
+    /// (no abort, no EOF) until the client goes away. Exercises read timeouts.
+    /// </summary>
+    public long? StallAfterBytes { get; set; }
 
     /// <summary>Optional fixed latency before the response body starts.</summary>
     public TimeSpan? InitialLatency { get; set; }

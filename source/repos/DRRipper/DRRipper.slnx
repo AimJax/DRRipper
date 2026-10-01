@@ -3,4 +3,5 @@
   <Project Path="DRRipper.TestServer/DRRipper.TestServer.csproj" />
   <Project Path="DRRipper.Tests/DRRipper.Tests.csproj" />
   <Project Path="DRRipper.Benchmarks/DRRipper.Benchmarks.csproj" />
+  <Project Path="DRRipper.RecoveryDriver/DRRipper.RecoveryDriver.csproj" />
 </Solution>

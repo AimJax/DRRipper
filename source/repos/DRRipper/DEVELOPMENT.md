@@ -45,3 +45,22 @@ dotnet run --project source/repos/DRRipper/DRRipper.Benchmarks -c Release -- --s
 - Every performance-sensitive change compares medians against BASELINE.md §6 under comparable conditions (same sizes/conns/iters, same class of hardware).
 - Measure: throughput, CPU, working set, handles, disk I/O, finalization latency. Investigate any **>5% median-throughput regression**.
 - A regression never justifies keeping incorrect behaviour — correctness (Phase 1) outranks speed. Integrity failures are excluded from medians and reported as CORRUPT, never as results. No performance claims beyond the measured loopback setup.
+- Since Ticket #004 the reference is DURABLE throughput (physical flush before completion). Buffered numbers are not comparable; never compare across the methodology break (see BASELINE.md Ticket #004 appendix).
+
+## 7. Recovery model (Ticket #004)
+
+- Downloads persist as `<name>.part` + `<name>.part.drmeta` (v2 JSON: schema
+  version, URL, resolved URL, filename, size, ETag/Last-Modified, segment
+  size, mode, merged completed ranges / prefix offset, timestamp, SHA-256).
+- Resume requires: valid checksum, same URL/filename/size/segment-size, an
+  intact full-length `.part`, and agreeing validators (strong ETag, else
+  Last-Modified; weak ETags need Last-Modified too; none on either side means
+  full restart). First post-recovery range request carries `If-Range`.
+- `ParallelDownloader` API is unchanged (`StartAsync` returns the FINAL path
+  after atomic rename). Tune per downloader: `RetryPolicy`, `ReadTimeout`
+  (default 30 s), `CheckpointInterval` (default 2 s).
+- Pause is synchronous and bounded; Cancel drops partials; Dispose preserves
+  them. Never delete `.part`/`.drmeta` by hand mid-run.
+- Kill-driver tests: `DRRipper.RecoveryDriver --url … --dir … --conns N`
+  (its stdout protocol is test-only). Same-port server restart
+  (`StartOnPortAsync`) gives pristine per-run request logs.

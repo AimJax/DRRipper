@@ -132,4 +132,16 @@ Principle: **reliability before optimisation**. No performance phase may begin u
 
 **Phase 1, items 1–3 (F-01 + F-02/F-12 + F-03):** strict chunk acceptance, gated completion, and non-destructive resume. These three convert DRRipper from "fast but untrusted" to "correct", unlock every later phase, and each carries a regression test. Estimated order within the milestone: F-02/F-12 scaffolding first (so failures become visible), then F-01, then F-03/F-04.
 
+---
+
+## Ticket #004 status (2026-10-01)
+
+Phase 1 integrity items are complete (Tickets #002–#004): strict acceptance,
+fault propagation, completion gate, bounded retry, and now persistent
+crash recovery with session isolation (F-03/F-04/F-06/F-10 resolved;
+see AUDIT.md §12). Remaining Phase 1 work deferred to the bulk-scheduler
+milestone: per-file failure isolation across queues (F-05) and queue-level
+validator tracking (ROADMAP Phase 3 item 5). Connection management (F-07)
+and adaptive segmentation stay in Phase 2. No roadmap restructuring needed.
+
 *End of ROADMAP.md.*
