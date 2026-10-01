@@ -145,4 +145,38 @@ UI redesign, no adaptive concurrency.
 - **Test server (§11):** added `StallAfterBytes` (clean read-timeout probe),
   `RemotePort` attribution, `BoundPort` (same-port server restart tests).
 
+## 11. Post-Ticket #004.1 architecture deltas (2026-10-01)
+
+Ticket #004.1 changes only the checkpoint publication path and its test seams;
+transfer, scheduling, pause machine, and file lifecycle are untouched.
+
+- **Generation authority (§4):** every checkpoint claims a monotonic generation
+  (`Interlocked`, reserved under a short lock with the throttle slot) and
+  publishes through a unique `*.drmeta.tmp.<generation>` path. Only a
+  generation strictly newer than the last published one may replace the
+  canonical snapshot; stale generations delete their own temp files. A
+  timed-out caller abandons its task, which settles later under the same
+  authority rules — it can never overwrite newer metadata.
+- **Validated flush (§6):** `OsFileFlusher` checks the Win32 boolean and throws
+  `Win32Exception` preserving the native error code. Flush precedes temp-write
+  precedes replace, without exception; failed flushes publish nothing.
+- **Observed tasks (§9):** checkpoint bodies catch everything into an outcome
+  record (`Published` / `StaleDiscarded` / `Faulted`), so abandoned tasks leave
+  no unobserved exceptions. Live temp paths are registered at claim time, so
+  the stray sweep can never delete an in-flight temp (the exact race the
+  stress test caught during development).
+- **Shutdown (§9):** `Dispose` invalidates late publishers, bounded-waits for
+  in-flight tasks (5 s), then releases handles; in-flight flushes fail safe on
+  disposed handles. Finalize awaits its own (newest) checkpoint within budget
+  and fails loudly otherwise — never a false durable `Completed`.
+- **Degraded pause (§5):** a failed pause checkpoint still parks cleanly but
+  reports `Paused (recovery checkpoint degraded: …; last good snapshot
+  retained)` with a flag, instead of implying durability.
+- **Seams (§11):** `IDurableFileFlusher` / `IMetadataPublisher` (internal,
+  constructor/property-injected fakes in tests only). No public API change.
+- **Durability policy (§7):** (A) OS-cache bytes, (B) Win32-confirmed flushed
+  bytes, (C) snapshots published strictly after (B) for the snapshotted
+  ranges. NTFS same-volume replace is the atomicity assumption, documented in
+  code; weaker filesystems would need `FileStream.WriteThrough` + fsync review.
+
 *End of ARCHITECTURE.md.*

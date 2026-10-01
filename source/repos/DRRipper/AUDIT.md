@@ -261,6 +261,42 @@ completion gate, unified cancellation, bounded retry (see ARCHITECTURE.md §9).
 
 ---
 
+## 13. Ticket #004.1 — resolution status (2026-10-01)
+
+### F-14 — Checkpoint generation race: timed-out checkpoint work can publish stale metadata (HIGH)
+
+1. **Identifier:** F-14 (next in the confirmed-defect sequence).
+2. **Severity:** High (stale recovery metadata class).
+3. **Affected file:** `DRRipper/DownloadSession.cs` (`Checkpoint`/`CheckpointCore`, Ticket #004 code).
+4. **Method/location:** bounded `Checkpoint(bool, TimeSpan)` + `RecoveryMetadata.WriteAtomically` (shared `.tmp` path).
+5. **Explanation:** The bounded checkpoint ran IO on a detached task without authority: after a caller timeout, the orphaned task kept writing the single shared `.drmeta.tmp` path and then replaced the canonical snapshot. A slow generation could therefore overwrite newer, already-published metadata, and concurrent generations shared one temp file (torn replace). Found by architectural review; a live variant (stray sweep deleting a live temp) was caught by T-CKPT-STRESS during development.
+6. **Reproduction:** T-CKPT-02 (stall → timeout → newer publishes → stale resumes → must discard) fails on the old design; T-CKPT-STRESS fails it reliably.
+7. **Correction (Ticket #004.1):** monotonic generations, unique temp per generation, publish-only-if-strictly-newer under a short lock, stale self-cleanup with live-set protection, validated flush before publish, observed task outcomes.
+8. **Regression tests:** T-CKPT-01–04 + stress (adversarial ordering suite).
+9. **Impact if unfixed:** crash recovery could resume from silently regressed byte maps.
+
+### F-15 — FlushFileBuffers return value ignored (MEDIUM)
+
+1. **Identifier:** F-15.
+2. **Severity:** Medium (durability guarantee void if triggered; no known field trigger).
+3. **Affected file:** `DRRipper/DownloadSession.cs` (`CheckpointCore`, Ticket #004 code).
+4. **Method/location:** `FlushFileBuffers(DestHandle)` invoked with discarded boolean.
+5. **Explanation:** A `false` return (flush failed) was swallowed, so metadata could be published describing ranges as durable that the OS never confirmed, voiding the ARCHITECTURE.md §10 guarantee at the Win32 boundary.
+6. **Reproduction:** T-CKPT-05 injects `Win32Exception(112)`; old code path publishes anyway.
+7. **Correction (Ticket #004.1):** `OsFileFlusher` throws `Win32Exception` preserving `Marshal.GetLastWin32Error()`; publish happens strictly after a successful flush; failures propagate as `DownloadFailedException` (pause degrades loudly, finalize fails loudly).
+8. **Regression tests:** T-CKPT-05/06/10.
+9. **Impact if unfixed:** unasserted durability on flush failure.
+
+### Disposition table (Ticket #004.1)
+
+| Finding | Status | Evidence |
+|---|---|---|
+| F-14 checkpoint generation race | **Resolved** | T-CKPT-01–04 + stress |
+| F-15 unchecked flush result | **Resolved** | T-CKPT-05/06/10 |
+| F-03/F-04/F-06/F-10/F-12/F-13 | Stay resolved; covered by unchanged + new tests | Full suite green |
+
+---
+
 ## 12. Ticket #004 — resolution status (2026-10-01)
 
 Sections 1–11 above are frozen and left intact. This section records the

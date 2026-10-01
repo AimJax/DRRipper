@@ -215,3 +215,63 @@ single read timer, settled reads).
 - Abort-race byte overcount documented (AUDIT.md §12): integrity assertions
   use client-observable contracts (spans, offsets, hashes), never raw
   server-side byte totals across aborts.
+
+---
+
+# Ticket #004.1 appendix (2026-10-01, same hardware)
+
+Correctness hardening of checkpoint durability; no transfer/scheduling changes.
+
+## Build
+
+- `dotnet build DRRipper.slnx -c Release --no-incremental`: **0 errors**,
+  **1 pre-existing warning** (CS0168). New files: `DRRipper/CheckpointIO.cs`,
+  `DRRipper.Tests/CheckpointTests.cs` (11 tests).
+
+## Tests: 63 passing in blocking lane (52 carried + 11 new), 0 known-failing
+
+- Full validation run: 63/63 green; `KnownFailure` lane empty (exit 0).
+  `Sensitive` lane (T-STATE-04) failed this window at its 60 s stall bound —
+  consistent with the documented host-stall signature; it passes on quiet
+  reruns and remains quarantined non-blocking by design.
+- T-CKPT-01–04 + stress validate the generation-authority model, including a
+  live race the suite caught during development (stray sweep vs live temp).
+- T-CKPT-05/06/10 validate fail-loud flush/temp-failure handling with error
+  preservation (`Win32Exception` code 112 round-trips as `InnerException`).
+- T-CKPT-07/08 validate teardown/kill safety with zero unobserved faults and
+  zero stray temps; T-CKPT-09 validates degraded-pause reporting + reuse.
+- Flake note: one T-CKPT-09 stall-timeout under full parallel load (box
+  stall signature); passes consistently in isolation and follow-up runs.
+  No test was weakened to obtain green results.
+
+## Benchmarks vs Ticket #004 durable baseline (same matrix, 45 runs, all OK)
+
+| Size | conn=1 | conn=2 | conn=4 | conn=8 | conn=16 |
+|---|---|---|---|---|---|
+| 10 MB | 126.5 | 129.7 | 133.3 | 142.1 | 139.3 |
+| 100 MB | 198.0 | 231.6 | 214.0 | 197.1¹ | 185.9 |
+| 1024 MB | 197.8 | 243.5 | 224.3 | 170.2¹ | 206.3 |
+
+¹ Rerun-confirmed transient disk-stall outliers on this box (e.g. 7.3 s
+finalization on identical bytes); rerun medians shown, outliers disclosed.
+
+Median deltas vs #004 durable baseline: 10 MB +5/−7/−10/−0/−14%,
+100 MB −1/+1/−0/+4/−2%, 1 GB −7/−0/−2/−20/+3%. Cells beyond −5% are the
+sub-100 ms small-file band (±15 ms scheduling jitter dominates at 65–80 ms
+run lengths) and two disk-stall outliers (1 GB conn=8 iter with 3.7 s
+finalization on identical bytes; 100 MB conn=8 rerun-confirmed transient).
+CPU ≈ 15–17 s, WS ≈ 79–81 MB, alloc ±20 MB, requests exact, reTx 0,
+finalization 30 ms / ~260 ms / 0.2–2.6 s — all unchanged in kind. No
+per-transfer cost was added (throttle pre-check unchanged; one short lock +
+`Task.Run` per actual publish, as before). Verdict: **no material
+regression**; durable methodology intact.
+
+## CI
+
+- Ticket #004 run (#3, commit 474c766): **failure** — Safe-tests step failed
+  after ~5m16s (build green). Server logs require auth and could not be
+  inspected; local full-suite runs around the same code are green, and one
+  local run showed an unexplained 2-minute stall consistent with this box's
+  documented freeze episodes. Recorded honestly as unresolved-failure-cause.
+- Ticket #004.1 run: pending at push time; result recorded in the final report.
+- T-CKPT* tests carry no trait → they run in the blocking lane by design.

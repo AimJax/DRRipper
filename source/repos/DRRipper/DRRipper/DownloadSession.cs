@@ -57,9 +57,15 @@ namespace DRRipper
         public List<long[]> CompletedRanges { get; set; } = new(); // [start,end], merged
         public long PrefixOffset { get; set; }
         public DateTimeOffset CheckpointUtc { get; set; }
+        /// <summary>
+        /// Monotonic publication generation (Ticket #004.1 §4). Diagnostic only:
+        /// authority is enforced in-memory, but the persisted generation lets
+        /// tests and operators observe which snapshot won.
+        /// </summary>
+        public long CheckpointGeneration { get; set; }
         public string Checksum { get; set; } = string.Empty;
 
-        private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
+        internal static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
         public string ComputeChecksum()
         {
@@ -90,24 +96,25 @@ namespace DRRipper
             catch { return null; }
         }
 
-        /// <summary>Atomic snapshot replacement (tmp + flush + move). Same-volume renames on NTFS are atomic.</summary>
-        public void WriteAtomically(string metaPath)
-        {
-            CheckpointUtc = DateTimeOffset.UtcNow;
-            Checksum = ComputeChecksum();
-            var tmp = metaPath + ".tmp";
-            using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous))
-            {
-                JsonSerializer.Serialize(fs, this, JsonOptions);
-                fs.Flush(true);
-            }
-            File.Move(tmp, metaPath, overwrite: true);
-        }
-
         public static void DeleteAll(string metaPath)
         {
+            // Canonical snapshot plus every temp-generation artifact, including
+            // legacy shared-tmp names. Best-effort: never fail teardown on this.
             try { if (File.Exists(metaPath)) File.Delete(metaPath); } catch { }
-            try { if (File.Exists(metaPath + ".tmp")) File.Delete(metaPath + ".tmp"); } catch { }
+            try
+            {
+                var dir = Path.GetDirectoryName(metaPath);
+                var name = Path.GetFileName(metaPath);
+                if (!string.IsNullOrEmpty(dir) && !string.IsNullOrEmpty(name) && Directory.Exists(dir))
+                {
+                    try { if (File.Exists(metaPath + ".tmp")) File.Delete(metaPath + ".tmp"); } catch { }
+                    foreach (var f in Directory.EnumerateFiles(dir, name + ".tmp.*"))
+                    {
+                        try { File.Delete(f); } catch { }
+                    }
+                }
+            }
+            catch { }
         }
     }
 
@@ -119,9 +126,6 @@ namespace DRRipper
     internal sealed class DownloadSession : IDisposable
     {
         private const int CheckpointMinIntervalNote = 0;
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool FlushFileBuffers(SafeFileHandle hFile);
 
         public readonly ParallelDownloader Owner;
         public readonly HttpClient Client;
@@ -178,9 +182,29 @@ namespace DRRipper
         public int CheckpointSkipped;
         public long PauseCheckpointMs;
         private DateTime _lastCheckpoint = DateTime.MinValue;
-        // Serializes snapshots: concurrent chunk completions must not share one
-        // tmp file (torn replace) nor interleave flush/move.
-        private readonly object _checkpointLock = new();
+        // Generation authority (Ticket #004.1 §4): every checkpoint claims a
+        // monotonically increasing generation and publishes through a UNIQUE
+        // temp path. Only a generation strictly newer than the last published
+        // one may replace the canonical snapshot; stale generations discard
+        // their own temp files. A timed-out caller never blocks publication,
+        // and a late task can never overwrite newer metadata.
+        private readonly object _publishLock = new();
+        private long _nextCheckpointGeneration;
+        private long _publishedGeneration;
+        private int _inflightCheckpoints;
+        private bool _disposedSession;
+        // Temp paths of generations currently alive (claimed, not yet settled).
+        // The stray sweep must never delete these.
+        private readonly HashSet<string> _liveTemps = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Injectable durability + publication seams (tests only replace these).</summary>
+        internal IDurableFileFlusher FileFlusher { get; set; } = new OsFileFlusher();
+        internal IMetadataPublisher MetadataPublisher { get; set; } = new AtomicFilePublisher();
+        /// <summary>Last checkpoint fault description, if any (diagnostics).</summary>
+        internal string? LastCheckpointError;
+        /// <summary>Count of checkpoint tasks that faulted after handling.</summary>
+        internal int CheckpointFaults;
+        /// <summary>True when a forced checkpoint failed while older durable state exists.</summary>
+        internal bool CheckpointDegraded;
         // Gate diagnostics (Ticket #004): call counts that must reconcile.
         public int CompleteRangeCalls;
         public int RequeueCount;
@@ -451,6 +475,18 @@ namespace DRRipper
         /// explicit failure at finalize) instead of hanging transfer or UI
         /// threads indefinitely (Ticket #004 §9).
         /// </summary>
+        /// <summary>Checkpoint publication outcome (internal; never escapes unobserved).</summary>
+        internal enum CheckpointOutcomeKind { Published, StaleDiscarded, Faulted }
+
+        internal sealed record CheckpointOutcome(CheckpointOutcomeKind Kind, string? Error, Exception? Cause);
+
+        /// <summary>
+        /// Persist ONLY verified coverage (tracker) or prefix offset, after flushing
+        /// file data. Throttled by CheckpointInterval unless forced (pause/final).
+        /// Bounded: wedged storage degrades to a skipped checkpoint (or an
+        /// explicit failure at finalize) instead of hanging transfer or UI
+        /// threads indefinitely (Ticket #004 §9).
+        /// </summary>
         public void Checkpoint(bool force) => Checkpoint(force, Timeout.InfiniteTimeSpan);
 
         public void Checkpoint(bool force, TimeSpan budget)
@@ -460,58 +496,98 @@ namespace DRRipper
             // NOTE: Timeout.InfiniteTimeSpan is negative (-1ms): only finite
             // budgets take the bounded path below.
             bool bounded = budget >= TimeSpan.Zero;
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            bool entered;
-            try
+            long gen;
+            string tmpPath;
+            lock (_publishLock)
             {
-                entered = bounded
-                    ? Monitor.TryEnter(_checkpointLock, budget)
-                    : Monitor.TryEnter(_checkpointLock);
-            }
-            catch (ObjectDisposedException) { return; }
-            if (!entered)
-                throw new TimeoutException("Recovery checkpoint is busy.");
-            try
-            {
-                if (!bounded)
+                if (_disposedSession)
+                    throw new ObjectDisposedException(nameof(DownloadSession), "Session is disposed; no checkpoint work accepted.");
+                var now = DateTime.UtcNow;
+                if (!force && (now - _lastCheckpoint) < CheckpointInterval)
                 {
-                    CheckpointCore(force);
+                    Interlocked.Increment(ref CheckpointSkipped);
                     return;
                 }
-                var remaining = budget - sw.Elapsed;
-                if (remaining <= TimeSpan.Zero)
-                    throw new TimeoutException("Recovery checkpoint budget exhausted.");
-                // Run IO off the caller so a wedged store can be abandoned; the
-                // previous atomic snapshot stays valid (torn tmp files are ignored).
-                var io = Task.Run(() => CheckpointCore(force), CancellationToken.None);
-                if (!io.Wait(remaining))
-                    throw new TimeoutException("Recovery checkpoint IO timed out.");
-                io.GetAwaiter().GetResult();
+                // Reserve the throttle slot up front so concurrent callers do not
+                // duplicate snapshots; authority is still decided at publish time.
+                _lastCheckpoint = now;
+                gen = ++_nextCheckpointGeneration;
+                tmpPath = MetaPath + ".tmp." + gen.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                _liveTemps.Add(tmpPath);
+                Interlocked.Increment(ref _inflightCheckpoints);
+            }
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            Task<CheckpointOutcome> io;
+            try
+            {
+                io = Task.Run(() => PublishGeneration(gen, tmpPath), CancellationToken.None);
+            }
+            catch
+            {
+                lock (_publishLock) { _liveTemps.Remove(tmpPath); }
+                Interlocked.Decrement(ref _inflightCheckpoints);
+                throw;
+            }
+            try
+            {
+                CheckpointOutcome outcome;
+                if (!bounded)
+                {
+                    outcome = io.GetAwaiter().GetResult();
+                }
+                else
+                {
+                    var remaining = budget - sw.Elapsed;
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        // The generation keeps running detached; when it finishes it
+                        // will discard itself as stale if anything newer published.
+                        throw new TimeoutException("Recovery checkpoint budget exhausted before IO began.");
+                    }
+                    if (!io.Wait(remaining))
+                    {
+                        // Same: the detached task settles on its own authority rules.
+                        throw new TimeoutException("Recovery checkpoint IO timed out.");
+                    }
+                    outcome = io.GetAwaiter().GetResult();
+                }
+                switch (outcome.Kind)
+                {
+                    case CheckpointOutcomeKind.Published:
+                        return;
+                    case CheckpointOutcomeKind.StaleDiscarded:
+                        // A newer generation already published durable state (or the
+                        // session went away): our data is preserved or superseded.
+                        // Never an error for transfer; pause/finalize callers
+                        // decide explicitly (they hold the newest generation).
+                        return;
+                    default:
+                        throw new DownloadFailedException(
+                            "Recovery checkpoint failed: " + (outcome.Error ?? "unknown publisher fault"),
+                            outcome.Cause);
+                }
             }
             catch (AggregateException ex) when (ex.InnerException is OperationCanceledException oce)
             {
                 throw oce;
             }
-            finally { Monitor.Exit(_checkpointLock); }
         }
 
-        private void CheckpointCore(bool force)
+        /// <summary>
+        /// Executes one checkpoint generation to completion on a worker thread.
+        /// Never throws out of the task delegate (faults become outcomes), so a
+        /// timed-out caller can abandon it without unobserved exceptions.
+        /// Ordering guarantee (Ticket #004.1 §7): data flush, then temp write +
+        /// temp flush, then authoritative replace — never inverted, never published
+        /// after a failed flush.
+        /// </summary>
+        private CheckpointOutcome PublishGeneration(long gen, string tmpPath)
         {
-            if (string.IsNullOrEmpty(MetaPath)) return; // unknown-size direct mode: nothing to persist
-            SessionCt.ThrowIfCancellationRequested();
-            var now = DateTime.UtcNow;
-            if (!force && (now - _lastCheckpoint) < CheckpointInterval)
-            {
-                Interlocked.Increment(ref CheckpointSkipped);
-                return;
-            }
+            string? tmp = null;
+            bool moved = false;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                if (DestHandle != null && !DestHandle.IsInvalid)
-                {
-                    try { FlushFileBuffers(DestHandle); } catch { }
-                }
                 var meta = new RecoveryMetadata
                 {
                     Url = Url,
@@ -523,21 +599,107 @@ namespace DRRipper
                     SegmentSize = ParallelDownloader.SegmentSize,
                     Mode = Mode,
                     PrefixOffset = PrefixOffset,
+                    CheckpointUtc = DateTimeOffset.UtcNow,
+                    CheckpointGeneration = gen,
                 };
                 if (Tracker != null)
                 {
                     foreach (var (s, e) in Tracker.SnapshotRanges())
                         meta.CompletedRanges.Add(new[] { s, e });
                 }
-                meta.WriteAtomically(MetaPath);
-                CheckpointCount++;
+                meta.Checksum = meta.ComputeChecksum();
+
+                // (2) durability flush must SUCCEED before anything is published.
+                FileFlusher.Flush(DestHandle!);
+
+                // (3)+(4) unique temp per generation (pre-registered, sweep-safe),
+                // flushed by the publisher.
+                tmp = tmpPath;
+                MetadataPublisher.WriteTemp(meta, tmp, CancellationToken.None);
+
+                // (5) authoritative replace: only a strictly newer generation wins.
+                lock (_publishLock)
+                {
+                    if (_disposedSession || gen <= _publishedGeneration)
+                        return new CheckpointOutcome(CheckpointOutcomeKind.StaleDiscarded, null, null);
+                    File.Move(tmp, MetaPath, overwrite: true);
+                    moved = true;
+                    _publishedGeneration = gen;
+                    CheckpointCount++;
+                    CheckpointDegraded = false;
+                    LastCheckpointError = null;
+                    SweepStrayTempsBestEffort();
+                    return new CheckpointOutcome(CheckpointOutcomeKind.Published, null, null);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var msg = ex.GetType().Name + ": " + ex.Message;
+                LastCheckpointError = msg;
+                Interlocked.Increment(ref CheckpointFaults);
+                return new CheckpointOutcome(CheckpointOutcomeKind.Faulted, msg, ex);
+            }
+            catch (OperationCanceledException ex)
+            {
+                // Cancellation (teardown) is neither fault nor success.
+                LastCheckpointError = "canceled: " + ex.Message;
+                return new CheckpointOutcome(CheckpointOutcomeKind.StaleDiscarded, "canceled", ex);
             }
             finally
             {
                 sw.Stop();
-                CheckpointWriteMs += sw.ElapsedMilliseconds;
-                _lastCheckpoint = now;
+                Interlocked.Add(ref CheckpointWriteMs, sw.ElapsedMilliseconds);
+                if (tmp != null && !moved)
+                {
+                    // Stale/failed generations must never leave temp artifacts.
+                    try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                }
+                lock (_publishLock) { _liveTemps.Remove(tmpPath); }
+                Interlocked.Decrement(ref _inflightCheckpoints);
             }
+        }
+
+        /// <summary>
+        /// Best-effort removal of orphan temp generations for this metadata path.
+        /// Live generations (claimed, not yet settled) are never touched.
+        /// </summary>
+        private void SweepStrayTempsBestEffort()
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(MetaPath);
+                var name = Path.GetFileName(MetaPath);
+                if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(name) || !Directory.Exists(dir)) return;
+                HashSet<string> live;
+                lock (_publishLock) { live = new HashSet<string>(_liveTemps, StringComparer.OrdinalIgnoreCase); }
+                try { if (File.Exists(MetaPath + ".tmp")) File.Delete(MetaPath + ".tmp"); } catch { }
+                foreach (var f in Directory.EnumerateFiles(dir, name + ".tmp.*"))
+                {
+                    if (live.Contains(f)) continue;
+                    try { File.Delete(f); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Published generation watermark (tests/diagnostics).</summary>
+        internal long PublishedGeneration
+        {
+            get { lock (_publishLock) return _publishedGeneration; }
+        }
+
+        /// <summary>Outstanding checkpoint tasks (tests/diagnostics).</summary>
+        internal int InflightCheckpoints => Volatile.Read(ref _inflightCheckpoints);
+
+        /// <summary>
+        /// Bounded settlement for shutdown: lets in-flight publisher tasks observe
+        /// invalidation and discard themselves. Never throws.
+        /// </summary>
+        internal void WaitForCheckpointDrain(TimeSpan budget)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (Volatile.Read(ref _inflightCheckpoints) > 0 && sw.Elapsed < budget)
+                Thread.Sleep(20);
         }
 
         // ---------- pause / resume / cancel (Ticket #004 §9) ----------
@@ -610,6 +772,7 @@ namespace DRRipper
             // is nothing to requeue here — just drop stale tracking entries and
             // checkpoint the verified state (bounded: a wedged store degrades to
             // a skipped checkpoint, never a hung Pause).
+            string? degradedNote = null;
             try
             {
                 ActiveRemainders.Clear();
@@ -618,13 +781,21 @@ namespace DRRipper
                 finally { PauseCheckpointMs = ckSw.ElapsedMilliseconds; }
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { Owner.SetState(DownloadState.Downloading, "Pause checkpoint failed: " + ex.Message); }
+            catch (Exception ex)
+            {
+                // Degraded pause (Ticket #004.1 §5): workers are parked and the
+                // last-good snapshot remains usable. Park as Paused but say so
+                // explicitly instead of implying a durable checkpoint succeeded.
+                CheckpointDegraded = true;
+                LastCheckpointError = ex.GetType().Name + ": " + ex.Message;
+                degradedNote = "Paused (recovery checkpoint degraded: " + ex.GetType().Name + "; last good snapshot retained).";
+            }
             lock (_phaseLock) { if (Phase == SessionPhase.Pausing) Phase = SessionPhase.Paused; }
             // Cancellation preempts pause (Ticket #004 §9): if Terminal arrived
             // mid-reconcile, leave Cancelled alone — never stomp it with Paused.
             bool paused;
             lock (_phaseLock) { paused = Phase == SessionPhase.Paused; }
-            if (paused) Owner.SetState(DownloadState.Paused);
+            if (paused) Owner.SetState(DownloadState.Paused, degradedNote);
             return paused;
         }
 
@@ -725,6 +896,11 @@ namespace DRRipper
 
         public void Dispose()
         {
+            // Invalidate late checkpoint publishers first so no stale generation
+            // can publish after teardown, then settle outstanding checkpoint work
+            // (bounded) before releasing the destination handle underneath it.
+            lock (_publishLock) { _disposedSession = true; }
+            WaitForCheckpointDrain(TimeSpan.FromSeconds(5));
             try { DestStream?.Dispose(); } catch { }
             DestStream = null;
             DestHandle = null;

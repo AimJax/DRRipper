@@ -144,4 +144,15 @@ milestone: per-file failure isolation across queues (F-05) and queue-level
 validator tracking (ROADMAP Phase 3 item 5). Connection management (F-07)
 and adaptive segmentation stay in Phase 2. No roadmap restructuring needed.
 
+---
+
+## Ticket #004.1 status (2026-10-01)
+
+Durability hardening only — no scope change. Checkpoint publication is now
+generation-authoritative (F-14/F-15 resolved; see AUDIT.md §13): overlapping
+or timed-out checkpoint work can never regress canonical metadata, flush
+failures fail loudly, and teardown/dispose settle boundedly. No scheduler,
+queue, concurrency-model, UI, or tuning work was introduced; bulk scheduling
+remains gated behind this ticket as planned.
+
 *End of ROADMAP.md.*

@@ -64,3 +64,29 @@ dotnet run --project source/repos/DRRipper/DRRipper.Benchmarks -c Release -- --s
 - Kill-driver tests: `DRRipper.RecoveryDriver --url … --dir … --conns N`
   (its stdout protocol is test-only). Same-port server restart
   (`StartOnPortAsync`) gives pristine per-run request logs.
+
+## 8. Checkpoint durability model (Ticket #004.1)
+
+- Every checkpoint claims a monotonic generation and publishes through a
+  unique `<meta>.tmp.<generation>` file. Only a generation strictly newer
+  than the last published one may replace the canonical snapshot; stale
+  generations delete their own temp files. A timed-out caller abandons its
+  task, which settles later under the same authority rules and can never
+  overwrite newer metadata.
+- Publish order per generation: snapshot → data flush (`OsFileFlusher`,
+  `Win32Exception` on failure) → temp write + temp flush → authoritative
+  replace. Failed flush ⇒ no publish, ever.
+- Budgets: transfer checkpoints 5 s (skipped on timeout, data stays valid in
+  memory), pause 15 s (degrades loudly, parks anyway), finalize 120 s
+  (failure fails the run — never a false durable `Completed`), session-start
+  30 s. Throttle interval still defaults to 2 s.
+- Temp lifecycle: live generations are registered; the stray sweep never
+  touches them; `DeleteAll` removes canonical + legacy `.tmp` + `.tmp.*`
+  strays. Startup loads canonical only and ignores all temps.
+- Timeout semantics: periodic → keep old snapshot, record fault, continue;
+  pause → park + `Paused (recovery checkpoint degraded: …)` flag;
+  finalize → `Failed`, part + last-good metadata retained for recovery.
+- Test seams (internal only): `IDurableFileFlusher` /
+  `IMetadataPublisher` (property-injected fakes), `DownloadSession` counters
+  (`CheckpointFaults`, `PublishedGeneration`, `InflightCheckpoints`),
+  server `StallAfterBytes` + `RemotePort`/`BoundPort` attribution.

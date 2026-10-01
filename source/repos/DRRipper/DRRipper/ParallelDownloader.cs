@@ -896,5 +896,11 @@ namespace DRRipper
                 return (s.PauseSemMs, s.PauseAckMs, s.PauseCheckpointMs);
             }
         }
+
+        /// <summary>Active download session, if any. Tests only (flusher/publisher injection).</summary>
+        internal DownloadSession? ActiveSession
+        {
+            get { lock (_sessionLock) return _session; }
+        }
     }
 }

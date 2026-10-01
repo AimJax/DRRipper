@@ -124,4 +124,24 @@ Suite totals after Ticket #003: **30 passing, 2 known-failing** (T-REC-01/05 per
 Suite totals after Ticket #004: **53 passing, 0 known-failing, 0 unexpected**
 (T-STATE-04 counted among the 53; quarantined from the blocking CI gate only).
 
+## 10. Ticket #004.1 implementation mapping (checkpoint durability, 2026-10-01)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| T-CKPT-01 concurrent checkpoints | Two gated overlapping generations; canonical ends at the later-claimed generation, valid, no strays | PASS |
+| T-CKPT-02 stall/timeout/supersede | Gen stalls, caller times out, newer publishes, stale resumes and is discarded; canonical pinned to newer | PASS |
+| T-CKPT-03 timeout leaves no trace | Nothing partial reaches canonical; late-but-newest work still publishes cleanly afterward | PASS |
+| T-CKPT-04 out-of-order | Three generations complete newest-first; highest valid wins with full coverage | PASS |
+| T-CKPT-05 flush failure | `Win32Exception(112)` preserved as `InnerException`; canonical byte-identical; no strays | PASS |
+| T-CKPT-06 temp-flush failure | `IOException` surfaces as `DownloadFailedException`; previous snapshot survives | PASS |
+| T-CKPT-07 stale task at kill | Timeout-abandon + dispose + late gate release → discard; restart loads canonical only | PASS |
+| T-CKPT-08 dispose during checkpoint | Bounded dispose, no hang, no unobserved fault, no publish, no stray temp | PASS |
+| T-CKPT-09 degraded pause | Pause parks cleanly with degraded flag/message; last-good snapshot intact and reusable | PASS |
+| T-CKPT-10 finalize flush failure | `Failed` (never `Completed`); part + last-good metadata survive; healed restart completes | PASS |
+| T-CKPT-STRESS | 200 concurrent gated checkpoints converge; canonical valid + complete; zero faults/strays | PASS |
+
+Suite totals after Ticket #004.1: **63 passing in the blocking lane
+(52 carried + 11 new), 0 known-failing, 0 unexpected.**
+T-STATE-04 remains the sole `Sensitive` quarantine (host-scheduling evidence in BASELINE).
+
 *End of TEST_PLAN.md.*
