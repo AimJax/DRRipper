@@ -348,3 +348,9 @@ fail-loud-preserving hardenings: live-part claims, bounded finalize retry).
   durations across #6 (timeout-like) and #7 (assert-like) point at environmental
   flakes rather than a deterministic product bug; under investigation with the
   maintainer (CI logs require auth and are not visible from this environment).
+- Ticket #005 run (#8, commit 256f8f9): **SUCCESS** — identical product code,
+  split lanes + trx/status-reporting workflow only. Engine 63 + scheduler 39 green
+  on CI. Verdict: runs #5–#7 were environmental flakes (slow shared runners +
+  Defender file locks + timing-heavy suite), consistent with the run-#3 precedent
+  on clean code. CI observability kept: failed test names publish as public commit
+  statuses (`ci/failed-tests-engine`, `ci/failed-tests-scheduler`).
