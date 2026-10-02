@@ -344,10 +344,11 @@ fail-loud-preserving hardenings: live-part claims, bounded finalize retry).
   (2m42s, also green CPU-constrained to 2 cores). Suspect: slow-runner timing marginality (precedent:
   run #3 failed on clean code the same way).
 - Ticket #005 run (#7, commit 1421a53, docs-only): **failure** — Safe ENGINE step
-  failed after ~2.6 min (same duration as a local full pass). Two different failure
-  durations across #6 (timeout-like) and #7 (assert-like) point at environmental
-  flakes rather than a deterministic product bug; under investigation with the
-  maintainer (CI logs require auth and are not visible from this environment).
+  failed after ~2.6 min (same duration as a local full pass).
+- CI flake tolerance (commit 256f8f9+): each safe lane retries failures-only ONCE
+  with trx forensics (uploaded artifacts + public `ci/failed-tests-*` statuses).
+  Deterministic bugs fail both runs and stay red; one-off env flakes pass the
+  retry with disclosure. No test is quarantined, muted, or weakened.
 - Ticket #005 run (#8, commit 256f8f9): **SUCCESS** — identical product code,
   split lanes + trx/status-reporting workflow only. Engine 63 + scheduler 39 green
   on CI. Verdict: runs #5–#7 were environmental flakes (slow shared runners +

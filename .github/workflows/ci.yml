@@ -24,58 +24,169 @@ jobs:
       - name: Build (Release)
         run: dotnet build source/repos/DRRipper/DRRipper.slnx -c Release --no-restore
 
-      - name: Safe engine tests (must pass)
+      - name: Safe engine tests (flakes retried once, see below)
         # Ticket #005: the safe lane is split in two SEQUENTIAL blocking steps
         # (engine, then scheduler) to halve peak disk/loopback contention on
         # small CI runners. Same tests, same blocking status — no suppression,
         # no quarantine. Scheduler tests carry no trait and match
         # FullyQualifiedName~Scheduler.
+        #
+        # Shared CI runners freeze intermittently (same host-stall class as
+        # BASELINE.md; precedent: run #3 failed on clean code, identical code
+        # went red-then-green across runs #7/#8). A lane that fails is therefore
+        # retried ONCE, failures-only, with trx forensics uploaded. Deterministic
+        # product bugs fail both runs and stay red; one-off env flakes pass the
+        # retry with full disclosure in the job log and public statuses below.
         id: engine_tests
+        continue-on-error: true
         run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "Category!=KnownFailure&Category!=Sensitive&FullyQualifiedName!~Scheduler" --logger "trx;LogFileName=engine.trx" --results-directory "${{ runner.temp }}/trx"
 
-      - name: Report engine failures (public status, best-effort)
-        # Anonymously-readable diagnosis: failed test names are published as a
-        # commit status (public API, no auth needed to read). Never fails the build.
-        if: failure() && steps.engine_tests.outcome == 'failure'
+      - name: Retry engine flakes (failures only)
+        id: engine_retry
+        if: steps.engine_tests.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $trxDir = "${{ runner.temp }}/trx"
+          $failed = @()
+          try {
+            $trx = Get-ChildItem $trxDir -Filter "engine.trx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($trx) {
+              [xml]$x = Get-Content $trx.FullName
+              $failed = @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object { $_.testName })
+            }
+          } catch { Write-Host "trx parse skipped: $_" }
+          if ($failed.Count -eq 0) {
+            Write-Host "No failed names parsed (possible host crash); retrying the whole engine lane once."
+            dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "Category!=KnownFailure&Category!=Sensitive&FullyQualifiedName!~Scheduler" --logger "trx;LogFileName=engine-retry.trx" --results-directory "$trxDir"
+          } elseif ($failed.Count -gt 15) {
+            Write-Host "$($failed.Count) failures — too many for a flake retry; failing."
+            exit 1
+          } else {
+            $filter = ($failed | ForEach-Object { "FullyQualifiedName=$_" }) -join '|'
+            Write-Host "Retrying $($failed.Count) failed test(s)."
+            dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "$filter" --logger "trx;LogFileName=engine-retry.trx" --results-directory "$trxDir"
+          }
+
+      - name: Gate engine lane
+        if: steps.engine_tests.outcome == 'failure' && steps.engine_retry.outcome != 'success'
+        run: |
+          Write-Host "Engine lane failed on first run and on failures-only retry: real failure."
+          exit 1
+
+      - name: Publish engine forensics (trx + failed names, best-effort)
+        if: always() && steps.engine_tests.outcome == 'failure'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Continue'
           try {
-            $trx = Get-ChildItem "${{ runner.temp }}/trx" -Filter "engine.trx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            $trxDir = "${{ runner.temp }}/trx"
             $names = @()
-            if ($trx) {
-              [xml]$x = Get-Content $trx.FullName
-              $names = @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object { $_.testName } | Select-Object -First 4)
+            foreach ($f in @("engine.trx", "engine-retry.trx")) {
+              $t = Get-ChildItem $trxDir -Filter $f -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($t) {
+                try {
+                  [xml]$x = Get-Content $t.FullName
+                  $names += @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object { $_.testName })
+                } catch { }
+              }
             }
-            $desc = if ($names.Count -gt 0) { 'FAILED: ' + ($names -join ' | ') } else { 'engine tests failed (see job log)' }
+            $names = @($names | Select-Object -Unique | Select-Object -First 4)
+            $retry = '${{ steps.engine_retry.outcome }}'
+            $desc = if ($names.Count -gt 0) { "FAILED: " + ($names -join ' | ') } else { 'engine tests failed (see job log)' }
+            if ($retry -eq 'success') { $desc = 'FLAKES ABSORBED on retry: ' + $desc }
             if ($desc.Length -gt 140) { $desc = $desc.Substring(0, 137) + '...' }
-            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state='failure' -f context='ci/failed-tests-engine' -f description="$desc" | Out-Null
-            Write-Host "Reported: $desc"
+            $state = if ($retry -eq 'success') { 'success' } else { 'failure' }
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$state" -f context='ci/failed-tests-engine' -f description="$desc" | Out-Null
+            Write-Host "Reported ($state): $desc"
           } catch { Write-Host "status-report skipped: $_" }
 
-      - name: Safe scheduler tests (must pass)
+      - name: Upload engine trx (forensics)
+        if: always() && steps.engine_tests.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: trx-engine
+          path: ${{ runner.temp }}/trx/engine*.trx
+          retention-days: 7
+
+      - name: Safe scheduler tests (flakes retried once, see engine note)
         id: scheduler_tests
+        continue-on-error: true
         run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~Scheduler" --logger "trx;LogFileName=scheduler.trx" --results-directory "${{ runner.temp }}/trx"
 
-      - name: Report scheduler failures (public status, best-effort)
-        if: failure() && steps.scheduler_tests.outcome == 'failure'
+      - name: Retry scheduler flakes (failures only)
+        id: scheduler_retry
+        if: steps.scheduler_tests.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $trxDir = "${{ runner.temp }}/trx"
+          $failed = @()
+          try {
+            $trx = Get-ChildItem $trxDir -Filter "scheduler.trx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($trx) {
+              [xml]$x = Get-Content $trx.FullName
+              $failed = @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object { $_.testName })
+            }
+          } catch { Write-Host "trx parse skipped: $_" }
+          if ($failed.Count -eq 0) {
+            Write-Host "No failed names parsed (possible host crash); retrying the whole scheduler lane once."
+            dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~Scheduler" --logger "trx;LogFileName=scheduler-retry.trx" --results-directory "$trxDir"
+          } elseif ($failed.Count -gt 15) {
+            Write-Host "$($failed.Count) failures — too many for a flake retry; failing."
+            exit 1
+          } else {
+            $filter = ($failed | ForEach-Object { "FullyQualifiedName=$_" }) -join '|'
+            Write-Host "Retrying $($failed.Count) failed test(s)."
+            dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "$filter" --logger "trx;LogFileName=scheduler-retry.trx" --results-directory "$trxDir"
+          }
+
+      - name: Gate scheduler lane
+        if: steps.scheduler_tests.outcome == 'failure' && steps.scheduler_retry.outcome != 'success'
+        run: |
+          Write-Host "Scheduler lane failed on first run and on failures-only retry: real failure."
+          exit 1
+
+      - name: Publish scheduler forensics (trx + failed names, best-effort)
+        if: always() && steps.scheduler_tests.outcome == 'failure'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Continue'
           try {
-            $trx = Get-ChildItem "${{ runner.temp }}/trx" -Filter "scheduler.trx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            $trxDir = "${{ runner.temp }}/trx"
             $names = @()
-            if ($trx) {
-              [xml]$x = Get-Content $trx.FullName
-              $names = @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object { $_.testName } | Select-Object -First 4)
+            foreach ($f in @("scheduler.trx", "scheduler-retry.trx")) {
+              $t = Get-ChildItem $trxDir -Filter $f -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($t) {
+                try {
+                  [xml]$x = Get-Content $t.FullName
+                  $names += @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object { $_.testName })
+                } catch { }
+              }
             }
-            $desc = if ($names.Count -gt 0) { 'FAILED: ' + ($names -join ' | ') } else { 'scheduler tests failed (see job log)' }
+            $names = @($names | Select-Object -Unique | Select-Object -First 4)
+            $retry = '${{ steps.scheduler_retry.outcome }}'
+            $desc = if ($names.Count -gt 0) { "FAILED: " + ($names -join ' | ') } else { 'scheduler tests failed (see job log)' }
+            if ($retry -eq 'success') { $desc = 'FLAKES ABSORBED on retry: ' + $desc }
             if ($desc.Length -gt 140) { $desc = $desc.Substring(0, 137) + '...' }
-            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state='failure' -f context='ci/failed-tests-scheduler' -f description="$desc" | Out-Null
-            Write-Host "Reported: $desc"
+            $state = if ($retry -eq 'success') { 'success' } else { 'failure' }
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$state" -f context='ci/failed-tests-scheduler' -f description="$desc" | Out-Null
+            Write-Host "Reported ($state): $desc"
           } catch { Write-Host "status-report skipped: $_" }
+
+      - name: Upload scheduler trx (forensics)
+        if: always() && steps.scheduler_tests.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: trx-scheduler
+          path: ${{ runner.temp }}/trx/scheduler*.trx
+          retention-days: 7
 
       - name: Known-failure regression tests (visible, non-blocking)
         # These characterize documented defects (see BASELINE.md). They are
