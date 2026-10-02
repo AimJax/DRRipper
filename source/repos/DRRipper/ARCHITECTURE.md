@@ -323,6 +323,35 @@ MainWindow.xaml.cs ───────────┤ (composition root only: 
 - **Superseded:** `Scheduler/QueueRow.cs` deleted (replaced by
   `DownloadJobViewModel`); old sequential MainWindow loop long gone (F-05).
 
+## 15. Post-Ticket #006.1 tray + close-safety deltas (2026-10-03)
+
+Presentation/lifecycle only — engine, scheduler, and store untouched.
+
+- **ContextMenu fix (§3, F-20):** the DataGrid popup now binds
+  `DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}"`.
+  Proven by STA tests that resolve all 13 menu commands against a real
+  `MainViewModel` (red before, green after).
+- **Tray (§5/§9/§14/§15):** `ITrayService` (events + Show/Hide/UpdateStatus/Dispose)
+  with `FakeTrayService` (tests) and `WindowsTrayService` (WinForms NotifyIcon,
+  one icon/menu/5 s timer, balloon once). Menu routes through a real
+  `TrayMenuRouter` into existing VM commands. Tooltip throttled, ≤60 chars,
+  never URLs/filenames. Lifetime = window composition; disposed exactly once
+  on real exit; survives jobs/filters/hide cycles.
+- **Close machine (§6–8/§11/§12):** `CloseController` (Running/Hiding/Exiting/
+  Exited) with pure `DecideClose(behavior, hasActive)`; X defers to hide (tray
+  intact, scheduler untouched) or begins a single-flight `RequestExitAsync`
+  (shutdown → dispose → `Application.Shutdown`, never re-entrant `Close()`).
+  Minimize-to-tray optional; restore reuses the same window/VM. Settings add
+  `CloseButtonBehavior` (default MinimizeToTray) + `MinimizeToTray`.
+- **Placement (§17/§18):** `WindowPlacement` capture/normalize (size clamp,
+  maximized round-trip, minimized never restored, off-screen recenter against
+  `Screen.AllScreens` work areas); captured + saved at real exit only.
+- **Polish (§19–22/§35):** settings dialog scrolls at 125/150%; toolbar scrolls
+  horizontally at compact widths (DataGrid itself never wrapped — virtualization
+  intact); Add dialog Enter/Escape; Desktop Behavior section with restart notes.
+
+*End of ARCHITECTURE.md.*
+
 *End of ARCHITECTURE.md.*
 
 *End of ARCHITECTURE.md.*

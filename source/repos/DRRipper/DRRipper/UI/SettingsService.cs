@@ -6,6 +6,17 @@ using System.Threading.Tasks;
 
 namespace DRRipper.UI
 {
+    /// <summary>Window close-button behavior (Ticket #006.1 §7).</summary>
+    public enum CloseButtonBehavior
+    {
+        /// <summary>X always hides the window to the tray (default: never lose work).</summary>
+        MinimizeToTray = 0,
+        /// <summary>X hides to tray while downloads are active, otherwise exits gracefully.</summary>
+        ExitWhenIdle = 1,
+        /// <summary>X always performs graceful preservation shutdown.</summary>
+        AlwaysExit = 2,
+    }
+
     /// <summary>
     /// Versioned user settings (Ticket #006 §19). Persisted separately from the
     /// queue DB at %LOCALAPPDATA%\DRRipper\settings.json. Budgets and the DB path
@@ -26,6 +37,11 @@ namespace DRRipper.UI
         public bool RememberWindowPlacement { get; set; } = true;
         public double WindowWidth { get; set; } = 1100;
         public double WindowHeight { get; set; } = 640;
+        public double WindowLeft { get; set; } = double.NaN;
+        public double WindowTop { get; set; } = double.NaN;
+        public bool WindowMaximized { get; set; }
+        public CloseButtonBehavior CloseBehavior { get; set; } = CloseButtonBehavior.MinimizeToTray;
+        public bool MinimizeToTray { get; set; } = true;
 
         public static AppSettings Defaults(string? defaultDirectory = null)
         {
@@ -50,6 +66,12 @@ namespace DRRipper.UI
             UiRefreshMs = Math.Clamp(UiRefreshMs, 250, 5000);
             WindowWidth = Math.Clamp(WindowWidth, 640, 7680);
             WindowHeight = Math.Clamp(WindowHeight, 400, 4320);
+            if (double.IsNaN(WindowLeft) || double.IsInfinity(WindowLeft) ||
+                WindowLeft < -100000 || WindowLeft > 100000) WindowLeft = 0;
+            if (double.IsNaN(WindowTop) || double.IsInfinity(WindowTop) ||
+                WindowTop < -100000 || WindowTop > 100000) WindowTop = 0;
+            if (!Enum.IsDefined(typeof(CloseButtonBehavior), CloseBehavior))
+                CloseBehavior = CloseButtonBehavior.MinimizeToTray;
             DefaultDownloadDirectory ??= string.Empty;
         }
     }

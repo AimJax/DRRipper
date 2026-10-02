@@ -216,6 +216,29 @@ Suite totals after Ticket #005.1: **117 passing in the blocking lane
 Suite totals after Ticket #006: **137 passing in the blocking lane
 (117 carried + 20 new: 10 VM + 6 settings + 3 scale + 1 XAML), 0 known-failing.**
 
+## 14. Ticket #006.1 implementation mapping (tray + close-safety, 2026-10-03)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| T-TRAY-01 hide on X | Active + default settings → hide, 0 shutdowns, tray visible | PASS |
+| T-TRAY-02 ExitWhenIdle | Idle → real exit, tray disposed | PASS |
+| T-TRAY-03 AlwaysExit | Active → real exit anyway | PASS |
+| T-TRAY-04 minimize | Minimize hides, 0 shutdowns | PASS |
+| T-TRAY-05 tray open | Restore fires, phase Running, 0 shutdowns | PASS |
+| T-TRAY-06/07 exit once | 1 + 4 concurrent/late exits → exactly 1 shutdown, 1 dispose | PASS |
+| T-TRAY-08 pause/resume | FakeTray events drive real VM commands | PASS |
+| T-TRAY-09 status | 5 s throttle boundary, idle/busy text, ≤60 chars, no URLs | PASS |
+| T-TRAY-10 dispose | Disposed on exit, idempotent | PASS |
+| T-TRAY-LEAK 100 cycles | 100 hide/restore: balanced counts, no shutdowns, no dispose | PASS |
+| T-WINDOW-01…06 | Round-trips, maximized, minimized-never, off-screen fix, save ordering, unicode/enum safety | PASS |
+| T-UI-CONTEXT-01…03 | Real menu DataContext + all 13 command bindings resolve | PASS |
+
+Suite totals after Ticket #006.1: **157 passing in the blocking lane
+(137 carried + 20 new: 10 tray + 1 leak-cycle + 6 window + 3 context-menu),
+0 known-failing.**
+
+*End of TEST_PLAN.md.*
+
 *End of TEST_PLAN.md.*
 
 *End of TEST_PLAN.md.*

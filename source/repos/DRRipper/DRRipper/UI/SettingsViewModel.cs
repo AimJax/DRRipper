@@ -16,6 +16,8 @@ namespace DRRipper.UI
         private string _defaultDownloadDirectory = string.Empty;
         private int _uiRefreshMs;
         private bool _rememberWindowPlacement;
+        private CloseButtonBehavior _closeBehavior;
+        private bool _minimizeToTray;
 
         public SettingsViewModel(AppSettings current)
         {
@@ -27,6 +29,8 @@ namespace DRRipper.UI
             _defaultDownloadDirectory = current.DefaultDownloadDirectory;
             _uiRefreshMs = current.UiRefreshMs;
             _rememberWindowPlacement = current.RememberWindowPlacement;
+            _closeBehavior = current.CloseBehavior;
+            _minimizeToTray = current.MinimizeToTray;
         }
 
         public int ActiveDownloadLimit { get => _activeDownloadLimit; set => Set(ref _activeDownloadLimit, value); }
@@ -36,6 +40,8 @@ namespace DRRipper.UI
         public string DefaultDownloadDirectory { get => _defaultDownloadDirectory; set => Set(ref _defaultDownloadDirectory, value ?? string.Empty); }
         public int UiRefreshMs { get => _uiRefreshMs; set => Set(ref _uiRefreshMs, value); }
         public bool RememberWindowPlacement { get => _rememberWindowPlacement; set => Set(ref _rememberWindowPlacement, value); }
+        public CloseButtonBehavior CloseBehavior { get => _closeBehavior; set => Set(ref _closeBehavior, value); }
+        public bool MinimizeToTray { get => _minimizeToTray; set => Set(ref _minimizeToTray, value); }
 
         /// <summary>True when a budgeted value differs (restart to take effect).</summary>
         public bool BudgetsChanged(AppSettings original)
@@ -56,6 +62,9 @@ namespace DRRipper.UI
                 DefaultDownloadDirectory = _defaultDownloadDirectory,
                 UiRefreshMs = _uiRefreshMs,
                 RememberWindowPlacement = _rememberWindowPlacement,
+                CloseBehavior = Enum.IsDefined(typeof(CloseButtonBehavior), _closeBehavior)
+                    ? _closeBehavior : CloseButtonBehavior.MinimizeToTray,
+                MinimizeToTray = _minimizeToTray,
             };
             s.Normalize();
             // Reflect normalization back so the dialog shows effective values.

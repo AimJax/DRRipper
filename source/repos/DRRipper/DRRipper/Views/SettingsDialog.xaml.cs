@@ -122,5 +122,29 @@ namespace DRRipper.Views
             if (_syncing || Vm is not { } vm) return;
             if (sender is System.Windows.Controls.ComboBox box) vm.PerHostConnectionBudget = ReadValue(box, vm.PerHostConnectionBudget);
         }
+
+        private static readonly string[] CloseLabels = { "Hide to tray", "Exit when idle", "Always exit" };
+
+        private void CloseBox_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.ComboBox box && Vm is { } vm)
+            {
+                _syncing = true;
+                try
+                {
+                    int index = (int)vm.CloseBehavior;
+                    if (index < 0 || index >= CloseLabels.Length) index = 0;
+                    box.SelectedIndex = index;
+                }
+                finally { _syncing = false; }
+            }
+        }
+
+        private void CloseBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_syncing || Vm is not { } vm) return;
+            if (sender is System.Windows.Controls.ComboBox box && box.SelectedIndex >= 0 && box.SelectedIndex < CloseLabels.Length)
+                vm.CloseBehavior = (UI.CloseButtonBehavior)box.SelectedIndex;
+        }
     }
 }

@@ -144,7 +144,11 @@
                             Style="{StaticResource AppButton}" Command="{Binding RefreshCommand}" />
                 </Grid>
 
-                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
+                <!-- Horizontal scroll keeps every action reachable at minimum width (§20);
+                     the DataGrid below is intentionally NOT wrapped (virtualization). -->
+                <ScrollViewer Grid.Row="1" Margin="0,8,0,0"
+                              HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                <StackPanel Orientation="Horizontal">
                     <Button Content="Pause" Style="{StaticResource AppButton}"
                             Command="{Binding PauseSelectedCommand}" ToolTip="Pause selected (Space toggles)" />
                     <Button Content="Resume" Style="{StaticResource AppButton}"
@@ -162,6 +166,7 @@
                     <Button Content="Clear Done" Style="{StaticResource AppButton}"
                             Command="{Binding ClearDoneCommand}" ToolTip="Remove completed/failed/cancelled entries" />
                 </StackPanel>
+                </ScrollViewer>
 
                 <!-- VIRTUALIZED JOB TABLE (§7/§22): no ScrollViewer wrapper, Recycling mode -->
                 <DataGrid x:Name="QueueGrid" Grid.Row="2" Margin="0,8,0,0"
@@ -175,7 +180,9 @@
                         <KeyBinding Key="Space" Command="{Binding TogglePauseResumeCommand}" />
                     </DataGrid.InputBindings>
                     <DataGrid.ContextMenu>
-                        <ContextMenu>
+                        <!-- Popup-tree DataContext fix (Ticket #006.1 §3): popups do NOT
+                             inherit DataContext, so bind explicitly to the placement target. -->
+                        <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                             <MenuItem Header="Pause" Command="{Binding PauseSelectedCommand}" />
                             <MenuItem Header="Resume" Command="{Binding ResumeSelectedCommand}" />
                             <MenuItem Header="Cancel" Command="{Binding CancelSelectedCommand}" />

@@ -63,10 +63,10 @@
 
         <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,12,0,0" HorizontalAlignment="Right">
             <Button Content="Add to Queue" Height="30" Width="120" Style="{StaticResource AppButton}" Click="AddButton_Click" />
-            <Button Content="Add and Start" Height="30" Width="120" Style="{StaticResource AccentButton}"
+            <Button Content="Add and Start" Height="30" IsDefault="True" Width="120" Style="{StaticResource AccentButton}"
                     ToolTip="Adds the URLs and ensures the queue is admitting jobs."
                     Click="AddStartButton_Click" />
-            <Button Content="Cancel" Height="30" Width="84" Style="{StaticResource AppButton}" Click="CancelButton_Click" />
+            <Button Content="Cancel" Height="30" Width="84" Style="{StaticResource AppButton}" Click="CancelButton_Click" IsCancel="True" />
         </StackPanel>
     </Grid>
 </Window>

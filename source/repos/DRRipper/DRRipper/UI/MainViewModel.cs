@@ -115,8 +115,10 @@ namespace DRRipper.UI
         public double AggregateMBps { get => _aggregateMBps; private set { if (Set(ref _aggregateMBps, value)) Raise(nameof(AggregateText)); } }
         public string AggregateText => "Aggregate " + Formatting.FormatRate(AggregateMBps * 1024.0 * 1024.0);
         public int TotalJobs { get => _totalJobs; private set => Set(ref _totalJobs, value); }
-        public int ActiveJobs { get => _activeJobs; private set => Set(ref _activeJobs, value); }
+        public int ActiveJobs { get => _activeJobs; private set { if (Set(ref _activeJobs, value)) Raise(nameof(HasActiveTransfers)); } }
         public int QueuedJobs { get => _queuedJobs; private set => Set(ref _queuedJobs, value); }
+        /// <summary>Close-safety signal for the window close controller (Ticket #006.1 §6).</summary>
+        public bool HasActiveTransfers => ActiveJobs > 0;
         public int CompletedJobs { get => _completedJobs; private set => Set(ref _completedJobs, value); }
         public int FailedJobs { get => _failedJobs; private set => Set(ref _failedJobs, value); }
         public string PermitsText { get => _permitsText; private set => Set(ref _permitsText, value); }
