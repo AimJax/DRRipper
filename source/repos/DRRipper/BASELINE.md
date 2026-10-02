@@ -341,6 +341,10 @@ fail-loud-preserving hardenings: live-part claims, bounded finalize retry).
   Same tests, same blocking status — verified locally as 63 + 39 = 102.
 - Ticket #005 run (#6, commit 58f89ae): **failure** — Safe ENGINE step failed
   after ~5.5 min (scheduler step skipped); engine lane is 63/63 green locally
-  (2m42s). Under investigation; #005 engine deltas are allocation-atomicity only
-  (§12), all locally green. Suspect: slow-runner timing marginality (precedent:
+  (2m42s, also green CPU-constrained to 2 cores). Suspect: slow-runner timing marginality (precedent:
   run #3 failed on clean code the same way).
+- Ticket #005 run (#7, commit 1421a53, docs-only): **failure** — Safe ENGINE step
+  failed after ~2.6 min (same duration as a local full pass). Two different failure
+  durations across #6 (timeout-like) and #7 (assert-like) point at environmental
+  flakes rather than a deterministic product bug; under investigation with the
+  maintainer (CI logs require auth and are not visible from this environment).

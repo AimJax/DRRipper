@@ -30,10 +30,52 @@ jobs:
         # small CI runners. Same tests, same blocking status — no suppression,
         # no quarantine. Scheduler tests carry no trait and match
         # FullyQualifiedName~Scheduler.
-        run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "Category!=KnownFailure&Category!=Sensitive&FullyQualifiedName!~Scheduler"
+        id: engine_tests
+        run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "Category!=KnownFailure&Category!=Sensitive&FullyQualifiedName!~Scheduler" --logger "trx;LogFileName=engine.trx" --results-directory "${{ runner.temp }}/trx"
+
+      - name: Report engine failures (public status, best-effort)
+        # Anonymously-readable diagnosis: failed test names are published as a
+        # commit status (public API, no auth needed to read). Never fails the build.
+        if: failure() && steps.engine_tests.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            $trx = Get-ChildItem "${{ runner.temp }}/trx" -Filter "engine.trx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            $names = @()
+            if ($trx) {
+              [xml]$x = Get-Content $trx.FullName
+              $names = @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object { $_.testName } | Select-Object -First 4)
+            }
+            $desc = if ($names.Count -gt 0) { 'FAILED: ' + ($names -join ' | ') } else { 'engine tests failed (see job log)' }
+            if ($desc.Length -gt 140) { $desc = $desc.Substring(0, 137) + '...' }
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state='failure' -f context='ci/failed-tests-engine' -f description="$desc" | Out-Null
+            Write-Host "Reported: $desc"
+          } catch { Write-Host "status-report skipped: $_" }
 
       - name: Safe scheduler tests (must pass)
-        run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~Scheduler"
+        id: scheduler_tests
+        run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~Scheduler" --logger "trx;LogFileName=scheduler.trx" --results-directory "${{ runner.temp }}/trx"
+
+      - name: Report scheduler failures (public status, best-effort)
+        if: failure() && steps.scheduler_tests.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            $trx = Get-ChildItem "${{ runner.temp }}/trx" -Filter "scheduler.trx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            $names = @()
+            if ($trx) {
+              [xml]$x = Get-Content $trx.FullName
+              $names = @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object { $_.testName } | Select-Object -First 4)
+            }
+            $desc = if ($names.Count -gt 0) { 'FAILED: ' + ($names -join ' | ') } else { 'scheduler tests failed (see job log)' }
+            if ($desc.Length -gt 140) { $desc = $desc.Substring(0, 137) + '...' }
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state='failure' -f context='ci/failed-tests-scheduler' -f description="$desc" | Out-Null
+            Write-Host "Reported: $desc"
+          } catch { Write-Host "status-report skipped: $_" }
 
       - name: Known-failure regression tests (visible, non-blocking)
         # These characterize documented defects (see BASELINE.md). They are
