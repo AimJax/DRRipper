@@ -25,7 +25,8 @@ public static class Program
     public static async Task<int> Main(string[] args)
     {
         string? schedJobs = GetArgOrNull(args, "--scheduler-jobs");
-        if (schedJobs != null)
+        string? permitBench = GetArgOrNull(args, "--permit-bench");
+        if (schedJobs != null || permitBench != null)
         {
             return await SchedulerBench.RunAsync(args);
         }

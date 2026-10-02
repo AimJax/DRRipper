@@ -248,6 +248,30 @@ QueueRow models (INPC, Dispatcher-marshaled)
 - **UI (§23/§24):** thin host — `QueueRow` models, Dispatcher marshaling only in
   MainWindow, EMA speed, throttled events. No Dispatcher in engine/scheduler.
 
-*End of ARCHITECTURE.md.*
+## 13. Post-Ticket #005.1 allocator + progress deltas (2026-10-03)
+
+Ticket #005.1 replaces only the permit mechanism and progress SQL; admission,
+store schema (still v1), lifecycle, and UI are untouched.
+
+- **Central allocator (§6A):** one global FIFO waiter queue + per-host active
+  counters under a single short lock. A grant issues only when global AND host
+  capacity are both free — no budget is ever held while waiting (F-18 fixed).
+  The scan grants the first ELIGIBLE waiter, so saturated hosts never head-block
+  others, while same-host order stays FIFO.
+- **Stable host entries (§4):** `Dictionary<host, HostState>` entries live for the
+  allocator lifetime — never removed, so no orphaned pool can bypass the cap
+  (F-17 fixed). 10k entries retain low-single-digit MB (measured).
+- **Cancellation (§9):** token registration removes Pending waiters and cancels
+  their TCS; a grant that already completed keeps standard completed-wait
+  semantics (owner holds a valid permit). Exactly one outcome per waiter.
+- **Disposal (§10):** rejects new work, fails pending waiters deterministically
+  with `ObjectDisposedException`, never throws from permit release paths;
+  granted permits stay valid and release normally.
+- **Permits:** exactly-once release (`Interlocked` flag); no semaphores remain —
+  pure counters + TCS, so no primitive-lifetime hazards at all.
+- **Monotonic progress (§12/§13):** `CompletedBytes = MAX(…)` in SQL;
+  TotalBytes promotes unknown→known and never shrinks; progress writes carry
+  `AND State NOT IN (5,6,7)` so late events can't touch terminal rows;
+  cancel/retry/admission pass `resetProgress` for deliberate fresh attempts.
 
 *End of ARCHITECTURE.md.*

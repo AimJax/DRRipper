@@ -337,6 +337,9 @@ namespace DRRipper.Scheduler
 
         /// <summary>
         /// Updates job state and optional fields atomically.
+        /// Ticket #005.1 §12: provided CompletedBytes/TotalBytes are monotonic
+        /// (MAX-guarded) unless <paramref name="resetProgress"/> explicitly starts
+        /// a fresh attempt (cancel/retry/admission), which zeroes CompletedBytes.
         /// </summary>
         public async Task UpdateStateAsync(
             Guid jobId,
@@ -350,6 +353,7 @@ namespace DRRipper.Scheduler
             string? hostKey = null,
             DateTimeOffset? lastStartedUtc = null,
             DateTimeOffset? completedUtc = null,
+            bool resetProgress = false,
             CancellationToken ct = default)
         {
             var sets = new List<string> { "State = @State", "UpdatedUtc = @UpdatedUtc" };
@@ -362,8 +366,22 @@ namespace DRRipper.Scheduler
 
             if (failureReason != null) { sets.Add("FailureReason = @FailureReason"); parameters.Add(new("@FailureReason", failureReason)); }
             if (attemptCount.HasValue) { sets.Add("AttemptCount = @AttemptCount"); parameters.Add(new("@AttemptCount", attemptCount.Value)); }
-            if (completedBytes.HasValue) { sets.Add("CompletedBytes = @CompletedBytes"); parameters.Add(new("@CompletedBytes", completedBytes.Value)); }
-            if (totalBytes.HasValue) { sets.Add("TotalBytes = @TotalBytes"); parameters.Add(new("@TotalBytes", totalBytes.Value)); }
+            if (resetProgress)
+            {
+                // Deliberate restart: a fresh attempt begins at zero. TotalBytes
+                // (file size knowledge) is preserved.
+                sets.Add("CompletedBytes = 0");
+            }
+            else if (completedBytes.HasValue) { sets.Add("CompletedBytes = MAX(CompletedBytes, @CompletedBytes)"); parameters.Add(new("@CompletedBytes", completedBytes.Value)); }
+            if (totalBytes.HasValue)
+            {
+                sets.Add(@"TotalBytes = CASE
+                        WHEN @TotalBytes IS NULL OR @TotalBytes <= 0 THEN TotalBytes
+                        WHEN TotalBytes IS NULL OR TotalBytes <= 0 THEN @TotalBytes
+                        ELSE MAX(TotalBytes, @TotalBytes)
+                    END");
+                parameters.Add(new("@TotalBytes", totalBytes.Value));
+            }
             if (resolvedFileName != null) { sets.Add("ResolvedFileName = @ResolvedFileName"); parameters.Add(new("@ResolvedFileName", resolvedFileName)); }
             if (resolvedFinalPath != null) { sets.Add("ResolvedFinalPath = @ResolvedFinalPath"); parameters.Add(new("@ResolvedFinalPath", resolvedFinalPath)); }
             if (hostKey != null) { sets.Add("HostKey = @HostKey"); parameters.Add(new("@HostKey", hostKey)); }
@@ -377,12 +395,25 @@ namespace DRRipper.Scheduler
         /// <summary>
         /// Updates only the progress fields (CompletedBytes, TotalBytes) for a job.
         /// Used for periodic progress persistence without full state change.
+        /// Ticket #005.1 §12: CompletedBytes is monotonic (MAX), so out-of-order
+        /// async writes can never regress the summary. TotalBytes is only ever
+        /// raised from unknown to known (never replaced by unknown/stale values).
+        /// Late writes never touch terminal jobs (Completed/Failed/Cancelled).
         /// </summary>
         public async Task UpdateProgressAsync(Guid jobId, long completedBytes, long? totalBytes = null, CancellationToken ct = default)
         {
-            var sql = totalBytes.HasValue
-                ? "UPDATE Jobs SET CompletedBytes = @CompletedBytes, TotalBytes = @TotalBytes, UpdatedUtc = @UpdatedUtc WHERE JobId = @JobId;"
-                : "UPDATE Jobs SET CompletedBytes = @CompletedBytes, UpdatedUtc = @UpdatedUtc WHERE JobId = @JobId;";
+            // Monotonic CompletedBytes + guarded TotalBytes + terminal-state guard.
+            // State: 5=Completed, 6=Failed, 7=Cancelled.
+            var sql = @"
+                UPDATE Jobs SET
+                    CompletedBytes = MAX(CompletedBytes, @CompletedBytes),
+                    TotalBytes = CASE
+                        WHEN @TotalBytes IS NULL OR @TotalBytes <= 0 THEN TotalBytes
+                        WHEN TotalBytes IS NULL OR TotalBytes <= 0 THEN @TotalBytes
+                        ELSE MAX(TotalBytes, @TotalBytes)
+                    END,
+                    UpdatedUtc = @UpdatedUtc
+                WHERE JobId = @JobId AND State NOT IN (5, 6, 7);";
 
             await _writeLock.WaitAsync(ct);
             try
@@ -391,9 +422,8 @@ namespace DRRipper.Scheduler
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@JobId", jobId.ToString());
                 cmd.Parameters.AddWithValue("@CompletedBytes", completedBytes);
+                cmd.Parameters.AddWithValue("@TotalBytes", totalBytes.HasValue ? totalBytes.Value : (object)DBNull.Value);
                 cmd.Parameters.AddWithValue("@UpdatedUtc", DateTimeOffset.UtcNow.ToString("o"));
-                if (totalBytes.HasValue)
-                    cmd.Parameters.AddWithValue("@TotalBytes", totalBytes.Value);
                 await cmd.ExecuteNonQueryAsync(ct);
                 Interlocked.Increment(ref _writeCount);
             }

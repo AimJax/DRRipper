@@ -168,4 +168,15 @@ F-07 addressed at scheduler level (gate policy); socket-buffer/adaptive work
 stays in Phase 2. F-16 (concurrent part sharing) found and fixed. No browser,
 media, clipboard, or tuning work introduced.
 
+---
+
+## Ticket #005.1 status (2026-10-03)
+
+Concurrency hardening only — no scope change. Permit allocation is now
+centralized (F-17/F-18 resolved): stable host entries, atomic dual-capacity
+grants, FIFO-eligible fairness, cancellation-safe waiters, deterministic
+disposal. Progress persistence is monotonic in SQL (F-19 resolved) with
+terminal-state guards and explicit reset paths. No UI/browser/adaptive/shared-
+HttpClient work introduced; bulk scheduling behavior otherwise unchanged.
+
 *End of ROADMAP.md.*

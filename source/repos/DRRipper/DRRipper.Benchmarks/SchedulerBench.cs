@@ -19,6 +19,12 @@ public static class SchedulerBench
 
     public static async Task<int> RunAsync(string[] args)
     {
+        string? permitBench = GetArgOrNull(args, "--permit-bench");
+        if (permitBench != null)
+        {
+            return RunPermitBench(permitBench);
+        }
+
         var jobsList = GetArg(args, "--scheduler-jobs", "1,2,3,4,8").Split(',').Select(int.Parse).ToArray();
         long sizeMb = long.Parse(GetArg(args, "--size-mb", "100"));
         int conns = int.Parse(GetArg(args, "--conns", "4"));
@@ -151,6 +157,35 @@ public static class SchedulerBench
         try { store.Dispose(); } catch { }
         try { Directory.Delete(dir, recursive: true); } catch { }
         return result;
+    }
+
+    /// <summary>
+    /// Permit allocator overhead (§17): uncontended acquire/release throughput,
+    /// allocations, and waiter/host bookkeeping. Usage: --permit-bench 10000[,100000]
+    /// </summary>
+    private static int RunPermitBench(string spec)
+    {
+        var counts = spec.Split(',').Select(s => long.TryParse(s, out var n) ? n : 10000L).ToArray();
+        Console.WriteLine($"PermitBench (global=16/host=8, 8 hosts round-robin, sequential):");
+        foreach (var total in counts)
+        {
+            using var budget = new ConnectionBudget(16, 8);
+            var hosts = Enumerable.Range(0, 8).Select(i => $"https://pb{i}.example").ToArray();
+            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+            long alloc0 = GC.GetAllocatedBytesForCurrentThread();
+            var sw = Stopwatch.StartNew();
+            for (long i = 0; i < total; i++)
+            {
+                using var _ = budget.AcquireAsync(hosts[i & 7]).GetAwaiter().GetResult();
+            }
+            sw.Stop();
+            long alloc = GC.GetAllocatedBytesForCurrentThread() - alloc0;
+            double ns = sw.Elapsed.TotalNanoseconds / total;
+            Console.WriteLine($"  ops={total,7}: {sw.Elapsed.TotalSeconds,7:F2}s  {ns,8:F0} ns/op  " +
+                $"alloc={alloc / 1024.0,8:F0}KB ({alloc / (double)total:F0} B/op)  " +
+                $"hosts={budget.HostStateCount} pending={budget.PendingWaiterCount} maxGlobal={budget.MaxGlobalObserved}");
+        }
+        return 0;
     }
 
     private static string GetArg(string[] args, string name, string @default)

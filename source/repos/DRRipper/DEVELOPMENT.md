@@ -118,3 +118,19 @@ dotnet run --project source/repos/DRRipper/DRRipper.Benchmarks -c Release -- --s
 - Test hook: `AbandonForKillTest()` simulates SIGKILL (zero shutdown writes).
 - Bench: `dotnet run --project DRRipper.Benchmarks -- --scheduler-jobs 1,2,3,4,8
   --size-mb 100 --conns 4 --iters 3` (integrity outside timed region; CORRUPT excluded).
+- Permit microbench: `--permit-bench 10000[,100000]` (sequential acquire/release
+  throughput, B/op, host bookkeeping).
+
+## 10. Allocator + progress model (Ticket #005.1)
+
+- Central grant: one FIFO queue + per-host active counters under one short lock;
+  grant iff global AND host capacity free; saturated hosts skipped, never blocking.
+- Hosts entries stable for allocator lifetime (never removed); 10k ≈ low MB.
+- Cancellation removes Pending waiters (no capacity consumed); completed grants keep
+  standard wait-completed semantics. Disposal fails pending waiters deterministically
+  (`ObjectDisposedException`); permit release never throws, exactly once.
+- Progress SQL: `CompletedBytes=MAX(…)`, TotalBytes promotes unknown→known only,
+  terminal rows excluded from progress writes, deliberate resets on
+  cancel/retry/admission. `.drmeta` remains the byte authority; DB is the summary.
+- Redirect attribution unchanged (origin host key per request, bounded); shared-
+  HttpClient refactor explicitly deferred.

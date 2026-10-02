@@ -367,7 +367,7 @@ namespace DRRipper.Scheduler
                 // Queued/paused with possible partials: Cancel deletes part/meta (engine semantics).
                 DeletePartialFiles(job);
             }
-            await _store.UpdateStateAsync(jobId, JobState.Cancelled, completedUtc: DateTimeOffset.UtcNow, ct: CancellationToken.None);
+            await _store.UpdateStateAsync(jobId, JobState.Cancelled, completedUtc: DateTimeOffset.UtcNow, resetProgress: true, ct: CancellationToken.None);
             try
             {
                 var updated = await _store.GetAsync(jobId);
@@ -389,7 +389,7 @@ namespace DRRipper.Scheduler
             if (job.AttemptCount >= _settings.MaxJobAttempts)
                 throw new InvalidOperationException($"MaxJobAttempts ({_settings.MaxJobAttempts}) reached for this job.");
             await _store.UpdateStateAsync(jobId, JobState.Queued,
-                attemptCount: job.AttemptCount + 1, ct: CancellationToken.None);
+                attemptCount: job.AttemptCount + 1, resetProgress: true, ct: CancellationToken.None);
             try
             {
                 var updated = await _store.GetAsync(jobId);
@@ -528,7 +528,7 @@ namespace DRRipper.Scheduler
                 try { hostKey = ConnectionBudget.NormalizeHostKey(job.OriginalUrl); } catch { hostKey = "unknown"; }
             }
             await _store.UpdateStateAsync(job.JobId, JobState.Downloading,
-                lastStartedUtc: DateTimeOffset.UtcNow, hostKey: hostKey, ct: CancellationToken.None);
+                lastStartedUtc: DateTimeOffset.UtcNow, hostKey: hostKey, resetProgress: true, ct: CancellationToken.None);
             try
             {
                 var updated = await _store.GetAsync(job.JobId);

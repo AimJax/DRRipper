@@ -357,3 +357,57 @@ fail-loud-preserving hardenings: live-part claims, bounded finalize retry).
   verified present but untriggered. Verdict: runs #5–#7/#9 were environmental
   flakes on slow shared runners (Defender locks + timing-heavy suite); the
   split-lane + retry design absorbs them with disclosure instead of suppression.
+
+---
+
+# Ticket #005.1 appendix (2026-10-03, same hardware)
+
+Centralized permit allocator + monotonic progress SQL. Admission, store schema
+(still v1), lifecycle, and UI unchanged.
+
+## Build
+
+- `dotnet build DRRipper.slnx -c Release`: **0 errors**; warnings unchanged
+  (pre-existing CS0168 + NU1903 advisory). Rewritten:
+  `Scheduler/ConnectionBudget.cs` (allocator); hardened `Scheduler/JobStore.cs`
+  (MAX/guarded progress SQL + `resetProgress`) and `Scheduler/DownloadScheduler.cs`
+  (reset call sites only); extended `Benchmarks/SchedulerBench.cs`
+  (`--permit-bench`); new `DRRipper.Tests/SchedulerHardeningTests.cs` (15 tests).
+
+## Tests: 117 passing in blocking lane (102 carried + 15 new), 0 known-failing
+
+- 9 T-BUDGET-HARD + 5 T-PROGRESS + 1 T-HOSTMEM, all green repeatedly (incl. 2× runs).
+- Existing T-BUDGET-01…08 green against the new allocator (API preserved).
+- Existing scheduler lanes (core/crash/scale/store) green against allocator + SQL changes.
+
+## Permit allocator microbench (sequential, global=16/host=8)
+
+| Ops | Time | ns/op | Alloc |
+|---|---|---|---|
+| 10,000 | 0.03 s | ~2,700 | ~320 B/op |
+| 100,000 | 0.08 s | ~800 | ~320 B/op |
+
+Governor cost is microseconds per transfer attempt — negligible vs millisecond
+network I/O. Contended-path bookkeeping adds one short lock + queue scan.
+
+## Host-state memory
+
+10k distinct retained host entries: low-single-digit MB (asserted < 16 MB with
+headroom; stable-host model kept — no unsafe cleanup reintroduced).
+
+## Scheduler transfer benchmarks vs Ticket #005 baseline (100 MB/file, 4 conns, 3 iters)
+
+| Active jobs | #005.1 median agg | #005 baseline | Δ |
+|---|---|---|---|
+| 1 | 198.7 MB/s | 196.3 | +1.2% |
+| 3 | 263.0 MB/s | 267.2 | −1.6% |
+| 8 | 302.8 MB/s | 293.2 | +3.3% |
+
+All within ±5%: allocator + SQL changes cost nothing measurable. Reqs exact,
+reTx 0, admit ~0 ms, dbw ~10–16/s, CPU/WS/handles in kind with #005.
+
+## CI
+
+- Ticket #005.1 run: pending at push time; result recorded in the final report.
+- New classes are `SchedulerBudgetHardeningTests`/`SchedulerProgressTests`, matched
+  by the existing `FullyQualifiedName~Scheduler` CI filter — no workflow change needed.

@@ -172,6 +172,27 @@ Suite totals after Ticket #005: **102 passing in the blocking lane
 (transient AV file locks — mitigated by bounded finalize retry; host scheduling
 stalls — documented box signature); all green in isolation and on reruns.
 
-*End of TEST_PLAN.md.*
+## 12. Ticket #005.1 implementation mapping (allocator + progress hardening, 2026-10-03)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| T-BUDGET-HARD-01 stable host entry | 250-acquisition churn + concurrent waiters; exactly one host entry | PASS |
+| T-BUDGET-HARD-02 host cap race | 2000 concurrent acquirers, cap 3; external + allocator max ≤ 3 | PASS |
+| T-BUDGET-HARD-03 no head-of-line | Global 4/host 2; A flooded; B granted while 6 A queued; global never pinned | PASS |
+| T-BUDGET-HARD-04 three-host fairness | Heavy A/B churn; light C served in bounded time | PASS |
+| T-BUDGET-HARD-05 cancel before grant | 200 queued waiters cancelled; zero drift; allocator healthy | PASS |
+| T-BUDGET-HARD-06 cancel/grant race | 1920 races; granted+cancelled reconciles; all counters zero | PASS |
+| T-BUDGET-HARD-07 dispose idempotence | 3× dispose; capacity returns exactly once | PASS |
+| T-BUDGET-HARD-08 dispose with pending | 50 waiters fail deterministically; no hang; post-dispose acquire rejected | PASS |
+| T-BUDGET-HARD-09 mixed 10k stress | 10k ops/8 hosts + cancels; caps hold continuously; zero drift | PASS |
+| T-HOSTMEM 10k retention | 10k entries retained, low MB measured | PASS |
+| T-PROGRESS-01 out-of-order | Both arrival orders converge to max | PASS |
+| T-PROGRESS-02 shuffled 500 | Concurrent shuffled updates converge to issued max | PASS |
+| T-PROGRESS-03 total pinned | Unknown/smaller totals never replace known total | PASS |
+| T-PROGRESS-04 terminal immune | Late progress cannot mutate Completed/Failed/Cancelled rows | PASS |
+| T-PROGRESS-05 isolation | 8 jobs × 100 updates converge to per-job maxima | PASS |
+
+Suite totals after Ticket #005.1: **117 passing in the blocking lane
+(102 carried + 15 new: 9 HARD + 5 PROGRESS + 1 HOSTMEM), 0 known-failing.**
 
 *End of TEST_PLAN.md.*

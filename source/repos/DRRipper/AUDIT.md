@@ -387,4 +387,61 @@ ARCHITECTURE.md §10).
 | F-16 part sharing | **Resolved** | T-SCHED-02/09 |
 | F-01/F-02/F-03/F-04/F-06/F-10/F-12/F-13/F-14/F-15 | Stay resolved; engine untouched in trust model | Full suite green |
 
+---
+
+## 15. Ticket #005.1 — resolution status (2026-10-03)
+
+### F-17 — Per-host semaphore lifetime race (HIGH)
+
+1. **Identifier:** F-17 (architectural review of Ticket #005 code).
+2. **Severity:** High (budget bypass: two live host pools for one host).
+3. **Affected file:** `DRRipper/Scheduler/ConnectionBudget.cs` (Ticket #005 code).
+4. **Method/location:** `ReleaseHost` removed the dictionary entry when
+   `CurrentCount == PerHostBudget` while a waiter could already hold a reference
+   to the orphaned semaphore.
+5. **Explanation:** Remove-then-recreate allowed two independent host pools for the
+   same normalized host to exist simultaneously, each granting up to the per-host
+   cap — up to 2× the configured limit.
+6. **Reproduction:** T-BUDGET-HARD-01 (churn + arriving waiters, single logical entry asserted).
+7. **Correction (Ticket #005.1):** host entries are stable for the allocator
+   lifetime — never removed. Retention measured trivial (§18 test).
+8. **Regression tests:** T-BUDGET-HARD-01/02/09.
+
+### F-18 — Global-slot head-of-line blocking (HIGH)
+
+1. **Identifier:** F-18.
+2. **Severity:** High (fairness violation: saturated host pins scarce global slots).
+3. **Affected file:** `DRRipper/Scheduler/ConnectionBudget.cs` (acquire-global-then-host order).
+4. **Explanation:** Requests that acquired a global permit and then queued for a
+   saturated host held global capacity while making no progress, starving hosts
+   with free capacity (8×A waiters pinning 16 global slots blocks host B entirely).
+5. **Reproduction:** T-BUDGET-HARD-03 (global=4/host=2, A flooded, B must begin).
+6. **Correction (Ticket #005.1):** centralized async allocator — a grant issues
+   only when BOTH capacities are free, atomically, from a single FIFO scan that
+   skips saturated hosts. No budget is ever held while waiting.
+7. **Regression tests:** T-BUDGET-HARD-03/04/09.
+
+### F-19 — Non-monotonic scheduler progress persistence (MEDIUM)
+
+1. **Identifier:** F-19.
+2. **Severity:** Medium (UI/DB summary regression; byte recovery unaffected — `.drmeta` authoritative).
+3. **Affected file:** `DRRipper/Scheduler/JobStore.cs` (`UpdateProgressAsync`) +
+   `DownloadScheduler.OnJobProgress` (fire-and-forget `Task.Run` writes completing out of order).
+4. **Explanation:** A 420 MB write reaching the DB before an in-flight 400 MB write
+   left the summary at 400 MB — backwards.
+5. **Reproduction:** T-PROGRESS-01 (both arrival orders), T-PROGRESS-02 (500 shuffled).
+6. **Correction (Ticket #005.1):** SQL `MAX(CompletedBytes, …)` monotonicity,
+   guarded TotalBytes promotion, terminal-state `WHERE State NOT IN (5,6,7)` guard,
+   and explicit `resetProgress` on deliberate restarts (cancel/retry/admission).
+7. **Regression tests:** T-PROGRESS-01…05.
+
+### Disposition table (Ticket #005.1)
+
+| Finding | Status | Evidence |
+|---|---|---|
+| F-17 host lifetime race | **Resolved** (stable entries) | T-BUDGET-HARD-01/02/09 |
+| F-18 global head-of-line | **Resolved** (central allocator) | T-BUDGET-HARD-03/04/09 |
+| F-19 progress regression | **Resolved** (SQL monotonicity) | T-PROGRESS-01…05 |
+| F-05/F-07/P-10/F-16 | Stay resolved | Full suite green |
+
 *End of AUDIT.md — see ROADMAP.md, ARCHITECTURE.md, TEST_PLAN.md.*
