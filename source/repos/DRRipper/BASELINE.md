@@ -350,8 +350,10 @@ fail-loud-preserving hardenings: live-part claims, bounded finalize retry).
   Deterministic bugs fail both runs and stay red; one-off env flakes pass the
   retry with disclosure. No test is quarantined, muted, or weakened.
 - Ticket #005 run (#8, commit 256f8f9): **SUCCESS** — identical product code,
-  split lanes + trx/status-reporting workflow only. Engine 63 + scheduler 39 green
-  on CI. Verdict: runs #5–#7 were environmental flakes (slow shared runners +
-  Defender file locks + timing-heavy suite), consistent with the run-#3 precedent
-  on clean code. CI observability kept: failed test names publish as public commit
-  statuses (`ci/failed-tests-engine`, `ci/failed-tests-scheduler`).
+  split lanes + trx/status-reporting workflow only.
+- Ticket #005 run (#10, commit 0f15647): **SUCCESS, no retries needed** — engine
+  63 first-attempt green (3m04s), scheduler 39 first-attempt green (3m09s),
+  KnownFailure empty, Sensitive (T-STATE-04) green. Retry/forensics machinery
+  verified present but untriggered. Verdict: runs #5–#7/#9 were environmental
+  flakes on slow shared runners (Defender locks + timing-heavy suite); the
+  split-lane + retry design absorbs them with disclosure instead of suppression.
