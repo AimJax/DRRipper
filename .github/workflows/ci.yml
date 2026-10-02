@@ -24,8 +24,16 @@ jobs:
       - name: Build (Release)
         run: dotnet build source/repos/DRRipper/DRRipper.slnx -c Release --no-restore
 
-      - name: Safe tests (must pass)
-        run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "Category!=KnownFailure&Category!=Sensitive"
+      - name: Safe engine tests (must pass)
+        # Ticket #005: the safe lane is split in two SEQUENTIAL blocking steps
+        # (engine, then scheduler) to halve peak disk/loopback contention on
+        # small CI runners. Same tests, same blocking status — no suppression,
+        # no quarantine. Scheduler tests carry no trait and match
+        # FullyQualifiedName~Scheduler.
+        run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "Category!=KnownFailure&Category!=Sensitive&FullyQualifiedName!~Scheduler"
+
+      - name: Safe scheduler tests (must pass)
+        run: dotnet test source/repos/DRRipper/DRRipper.Tests/DRRipper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~Scheduler"
 
       - name: Known-failure regression tests (visible, non-blocking)
         # These characterize documented defects (see BASELINE.md). They are
