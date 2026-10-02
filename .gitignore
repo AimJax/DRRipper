@@ -16,3 +16,9 @@ publish/
 # Ticket #002: test and benchmark artifacts (never commit results)
 TestResults/
 source/repos/DRRipper/DRRipper.Benchmarks/results/
+
+# Ticket #005: queue databases (production lives in %LOCALAPPDATA%, tests in temp)
+*.db
+*.db-wal
+*.db-shm
+*.db-journal

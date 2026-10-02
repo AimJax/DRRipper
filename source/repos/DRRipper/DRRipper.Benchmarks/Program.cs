@@ -24,6 +24,12 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        string? schedJobs = GetArgOrNull(args, "--scheduler-jobs");
+        if (schedJobs != null)
+        {
+            return await SchedulerBench.RunAsync(args);
+        }
+
         var sizesMb = GetArg(args, "--sizes-mb", "10,100,1024").Split(',').Select(long.Parse).ToArray();
         var conns = GetArg(args, "--conns", "1,2,4,8,16").Split(',').Select(int.Parse).ToArray();
         int iters = int.Parse(GetArg(args, "--iters", "3"));

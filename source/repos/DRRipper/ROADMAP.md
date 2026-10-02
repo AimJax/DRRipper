@@ -155,4 +155,17 @@ failures fail loudly, and teardown/dispose settle boundedly. No scheduler,
 queue, concurrency-model, UI, or tuning work was introduced; bulk scheduling
 remains gated behind this ticket as planned.
 
+---
+
+## Ticket #005 status (2026-10-02)
+
+Phase 3 bulk-scheduler milestone delivered: persistent SQLite queue (WAL,
+versioned schema), FIFO/priority admission, ActiveDownloadLimit (default 3),
+global 16 + per-host 8 network budgets enforced per transfer attempt, per-job
+failure isolation (F-05 resolved), crash restart via `.drmeta` reuse, orderly
+shutdown preserving partials, minimal queue UI, and 39 new tests green.
+F-07 addressed at scheduler level (gate policy); socket-buffer/adaptive work
+stays in Phase 2. F-16 (concurrent part sharing) found and fixed. No browser,
+media, clipboard, or tuning work introduced.
+
 *End of ROADMAP.md.*

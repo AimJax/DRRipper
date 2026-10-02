@@ -273,5 +273,63 @@ regression**; durable methodology intact.
   inspected; local full-suite runs around the same code are green, and one
   local run showed an unexplained 2-minute stall consistent with this box's
   documented freeze episodes. Recorded honestly as unresolved-failure-cause.
-- Ticket #004.1 run: pending at push time; result recorded in the final report.
+- Ticket #004.1 run (#4, commit b46ad3e): **success** (recorded post-push).
 - T-CKPT* tests carry no trait → they run in the blocking lane by design.
+
+---
+
+# Ticket #005 appendix (2026-10-02, same hardware)
+
+Persistent bulk scheduler above the untouched transfer trust model (plus two
+fail-loud-preserving hardenings: live-part claims, bounded finalize retry).
+
+## Build
+
+- `dotnet build DRRipper.slnx -c Release`: **0 errors**, 1 pre-existing warning
+  (CS0168) + 1 NU1903 advisory (`SQLitePCLRaw.lib.e_sqlite3` 2.1.10, transitive via
+  `Microsoft.Data.Sqlite` 9.0.0 — no alternative without changing the approved store).
+- New production files: `Scheduler/JobModels.cs`, `JobStore.cs`,
+  `ConnectionBudget.cs`, `ActiveJobRuntime.cs`, `DownloadScheduler.cs`,
+  `SchedulerInfra.cs`, `QueueRow.cs`; rewritten `MainWindow.xaml(.cs)`;
+  engine deltas confined to `DownloadSession.cs` (part claims, gate, finalize retry)
+  + `ParallelDownloader.cs` (gate passthrough). New tests: `SchedulerStoreBudgetTests.cs`
+  (21), `SchedulerCoreTests.cs` (10), `SchedulerCrashTests.cs` (3),
+  `SchedulerScaleTests.cs` (5). New bench: `Benchmarks/SchedulerBench.cs`.
+
+## Tests: 102 passing in blocking lane (63 carried + 39 new), 0 known-failing
+
+- 39 new: 10 T-SCHED + 10 T-STORE + 11 T-BUDGET/power/hostkey/redact + 5 scale/mixed + 3 crash.
+- Full-suite parallel-load notes (all green in isolation/reruns, nothing weakened):
+  transient AV file locks under 100+ concurrent file ops (mitigated: bounded final
+  checkpoint retry, original exception preserved); host scheduling stalls (box
+  signature: 2-minute single-test freeze, e.g. T-REC-05b 1s in isolation).
+- `Sensitive` (T-STATE-04) and `KnownFailure` (empty) lanes unchanged by this ticket;
+  T-SCHED*/T-STORE*/T-BUDGET* carry no trait → blocking lane by design.
+
+## Scheduler benchmarks (100 MB/file, 4 conns, 3 iters, all SHA-256 OK, reqs exact, reTx 0)
+
+| Active jobs | Median agg MB/s | Median per-file | CPU s | WS MB | hdlΔ | dbw/s | admit ms |
+|---|---|---|---|---|---|---|---|
+| 1 | 196.3 | 196.3 | 2.53 | 72 | 13 | 9.8 | 0 |
+| 2 | 231.9 | 116.0 | 3.69 | 86 | 21 | 10.4 | 0 |
+| 3 | 267.2 | 89.1 | 4.28 | 89 | 9 | 11.6 | 0 |
+| 4 | 282.6 | 70.7 | 4.97 | 95 | 12 | 12.0 | 0 |
+| 8 | 293.2 | 36.7 | 9.36 | 102 | 16 | 14.7 | 0 |
+
+- **Single-job overhead:** 196.3 vs raw-engine 204.4 (same box, same day) = **−4.0%,
+  inside the 5% bar** (methodology note: an early bench build timed SHA-256
+  verification inside the window and showed −75%; moving integrity outside the
+  timed region per policy restored honest numbers — recorded here so the artifact
+  is not mistaken for product overhead).
+- **Scaling:** aggregate rises to ~293 MB/s at 8 jobs then plateaus (disk/server
+  bound); per-file falls proportionally; no starvation (all jobs complete every run).
+- **DB write rate:** ~10–15 writes/s total under load (state transitions + 2 s
+  progress persists); 10k idle rows ≈ zero traffic.
+- **Memory:** 10k queued enqueue bounded; WS idle vs running recorded in
+  T-STRESS-QUEUE-10000 (active runtimes only; UI loads row summaries, virtualization
+  deferred to the UI milestone — runtime vs UI-visible distinction documented).
+
+## CI
+
+- Ticket #004.1 run (#4, commit b46ad3e): **success**.
+- Ticket #005 run: pending at push time; result recorded in the final report.

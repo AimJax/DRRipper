@@ -90,3 +90,31 @@ dotnet run --project source/repos/DRRipper/DRRipper.Benchmarks -c Release -- --s
   `IMetadataPublisher` (property-injected fakes), `DownloadSession` counters
   (`CheckpointFaults`, `PublishedGeneration`, `InflightCheckpoints`),
   server `StallAfterBytes` + `RemotePort`/`BoundPort` attribution.
+
+## 9. Scheduler model (Ticket #005)
+
+- Queue lives in SQLite (`%LOCALAPPDATA%\DRRipper\queue.db`; tests inject temp
+  paths): `Jobs` table (all §7 fields) + `SchemaVersion` table; WAL,
+  `foreign_keys=ON`, `busy_timeout=5000`, `synchronous=NORMAL` (desktop trade-off,
+  documented in code). All SQL parameterized; bulk import = one transaction.
+  Corrupt/future schemas throw explicitly — never silent reset.
+- States: Queued → Downloading ⇄ Paused, Retrying (persisted), Completed/Failed/
+  Cancelled (terminal), Interrupted (crash-normalized). Only active jobs own
+  runtimes/sessions; queued rows are inert.
+- Budgets: `ConnectionBudget(global, perHost)` implements `INetworkPermitGate`;
+  sessions acquire per attempt (global-first) and release in `finally` before any
+  backoff. Host key = `scheme://host[:port]`, default ports elided, IPv6-safe.
+  Redirects are served inside the single request's permit (bounded, documented).
+- Admission: FIFO by QueuePosition within Priority; `ActiveDownloadLimit`
+  (default 3) caps runtimes; budgets cap segments; per-job conns bound fairness.
+- Shutdown: `StopAsync` stops admission, teardowns preserving files, persists
+  Interrupted, settles bounded. Cancel drops partials; Remove deletes part/meta
+  only (never finals); Pause preserves. No automatic scheduler requeue;
+  `RetryJobAsync` gated by `MaxJobAttempts` (default 3).
+- Progress: DB summaries only (`.drmeta` is the byte authority); persist ≤2 s,
+  UI events ≤~4/s; 10k idle rows ≈ zero DB traffic. URLs redacted in diagnostics
+  (`UrlRedactor` strips query/userinfo); engine always uses the exact URL.
+- Power: `SchedulerPowerManager` ref-count (unit-tested).
+- Test hook: `AbandonForKillTest()` simulates SIGKILL (zero shutdown writes).
+- Bench: `dotnet run --project DRRipper.Benchmarks -- --scheduler-jobs 1,2,3,4,8
+  --size-mb 100 --conns 4 --iters 3` (integrity outside timed region; CORRUPT excluded).

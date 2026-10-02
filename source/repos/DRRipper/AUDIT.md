@@ -333,4 +333,58 @@ ARCHITECTURE.md §10).
   frozen thread; the mitigation is fail-fast bounds everywhere (semaphores,
   ack, checkpoint budgets, test wrappers).
 
+---
+
+## 14. Ticket #005 — resolution status (2026-10-02)
+
+### F-05 — One bad URL aborts the entire batch (HIGH) — RESOLVED
+
+1. **Identifier:** F-05 (confirmed in the frozen Ticket #001 audit).
+2. **Severity:** High (batch-killer for bulk queues).
+3. **Affected files (old):** `DRRipper/MainWindow.xaml.cs` (sequential batch loop — removed).
+4. **Correction (Ticket #005):** the sequential loop is replaced by `DownloadScheduler`:
+   each job runs in an isolated `ActiveJobRuntime` with per-job try/catch and terminal
+   mapping; a `DownloadFailedException` (e.g. 404) marks only its job `Failed` with the
+   reason persisted, and the admission loop continues. Global scheduler exceptions are
+   contained per job and diagnosed, never silently killing the queue loop.
+5. **Regression tests:** T-SCHED-02 (good/404/good), T-STRESS-MIXED (40/20/1 ledger).
+6. **Impact if unfixed:** bulk downloading unusable with real-world URL lists.
+
+### F-07 — Unbounded connection pooling (HIGH) — ADDRESSED AT SCHEDULER LEVEL
+
+1. **Identifier:** F-07.
+2. **Status:** connection policy now lives in the scheduler (`ConnectionBudget`:
+   global 16 + per-host 8 defaults, configurable, enforced per transfer attempt via
+   `INetworkPermitGate`), replacing `int.MaxValue` as effective policy. The handler's
+   `MaxConnectionsPerServer` field is unchanged (engine untouched); backpressure now
+   comes from the gate. Socket-buffer retuning and adaptive concurrency stay in Phase 2.
+3. **Evidence:** T-BUDGET-01…08 (caps never exceeded, permits always returned, no starvation).
+
+### P-10 — Sleep-prevention races (POTENTIAL) — RESOLVED
+
+1. **Status:** `SchedulerPowerManager` reference-counts active jobs; system-required
+   state held while ≥1 transfer active, released at zero. Unit-tested (refcount + underflow-safe).
+
+### F-16 — Concurrent same-filename sessions share one `.part` (HIGH, found by T-SCHED-02/09)
+
+1. **Identifier:** F-16 (new in Ticket #005 testing).
+2. **Severity:** High (cross-job corruption: second job deleted/truncated the first's
+   in-progress part; `ResolveUniquePath` no-ops when the final doesn't exist yet).
+3. **Affected file:** `DRRipper/DownloadSession.cs` (`Prepare`/`CreateFreshFile`).
+4. **Correction:** process-local live-part claim registry + `ResolveClaimFreePath`
+   (always advances) + `CreateNew` atomic creation; resume still reuses validated
+   parts across restarts (claims are process-local, released on Dispose/Cancel/Finalize).
+5. **Regression tests:** T-SCHED-02, T-SCHED-09 (duplicate URLs → independent files).
+6. **Impact if unfixed:** any two concurrent same-name jobs corrupt each other.
+
+### Disposition table (Ticket #005)
+
+| Finding | Status | Evidence |
+|---|---|---|
+| F-05 batch abort | **Resolved** | T-SCHED-02, T-STRESS-MIXED |
+| F-07 unbounded connections | **Addressed** (policy at scheduler gate) | T-BUDGET-01…08 |
+| P-10 power races | **Resolved** | T_POWER_RefCounted |
+| F-16 part sharing | **Resolved** | T-SCHED-02/09 |
+| F-01/F-02/F-03/F-04/F-06/F-10/F-12/F-13/F-14/F-15 | Stay resolved; engine untouched in trust model | Full suite green |
+
 *End of AUDIT.md — see ROADMAP.md, ARCHITECTURE.md, TEST_PLAN.md.*

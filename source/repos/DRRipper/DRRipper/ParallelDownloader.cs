@@ -197,6 +197,14 @@ namespace DRRipper
         /// <summary>Minimum interval between recovery checkpoints (Ticket #004 §4; pause/final always checkpoint).</summary>
         public TimeSpan CheckpointInterval { get; set; } = TimeSpan.FromSeconds(2);
 
+        /// <summary>
+        /// Scheduler network permit gate (Ticket #005 §13). When set, each worker
+        /// transfer attempt acquires global + per-host permits. Null = ungated.
+        /// </summary>
+        public Scheduler.INetworkPermitGate? NetworkGate { get; set; }
+        /// <summary>Host key override for budget attribution. Defaults to URL origin.</summary>
+        public string? NetworkHostKey { get; set; }
+
         /// <summary>Fixed segment size for the dynamic chunk queue (unchanged default).</summary>
         internal const long SegmentSize = 8 * 1024 * 1024;
 
@@ -714,6 +722,8 @@ namespace DRRipper
                 ResolvedUrl = resolvedUrl,
                 AcceptRanges = acceptRanges,
                 Mode = (acceptRanges && connections > 1 && totalSize > 0) ? "segmented" : "prefix",
+                NetworkGate = NetworkGate,
+                NetworkHostKey = NetworkHostKey,
             };
             lock (_sessionLock)
             {

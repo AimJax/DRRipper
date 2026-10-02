@@ -179,4 +179,75 @@ transfer, scheduling, pause machine, and file lifecycle are untouched.
   ranges. NTFS same-volume replace is the atomicity assumption, documented in
   code; weaker filesystems would need `FileStream.WriteThrough` + fsync review.
 
+## 12. Post-Ticket #005 architecture deltas (2026-10-02)
+
+Ticket #005 adds the persistent scheduler layer ABOVE the engine. Transfer,
+checkpointing, pause machine, and file lifecycle are unchanged except two
+hardening deltas (part-claim registry, bounded finalize retry — both
+fail-loud-preserving, see below).
+
+```
+MainWindow (thin host) ──events──▶ DownloadScheduler ──owns──▶ JobStore (SQLite)
+        │                               │  ├─ ConnectionBudget (global + per-host gate)
+        │                               │  └─ ActiveJobRuntime × N (≤ ActiveDownloadLimit)
+        │                               ▼
+        │                         ParallelDownloader (per job) ──borrows──▶ HttpClient/handler
+        │                               ▼
+        │                         DownloadSession (+ INetworkPermitGate per attempt)
+        ▼
+QueueRow models (INPC, Dispatcher-marshaled)
+```
+
+- **Job store (§5/§6):** SQLite (`Microsoft.Data.Sqlite`), WAL + `foreign_keys=ON`
+  + `busy_timeout=5000` + `synchronous=NORMAL` (documented desktop trade-off),
+  single-connection serialized access, all parameterized, single-batch transactions
+  for imports, versioned schema (`SchemaVersion` table, idempotent migrate),
+  future versions produce an explicit error (never silent reset). Production path:
+  `%LOCALAPPDATA%\DRRipper\queue.db`; tests inject temp paths. `*.db*` git-ignored.
+- **Job model (§7/§8):** GUID JobId, URL/dir/names, QueuePosition + Priority,
+  state, reason, attempts, conns/file, bytes, host key, timestamps. Runtime-only
+  objects never persisted. States: Queued/Downloading/Pausing/Paused/Retrying/
+  Completed/Failed/Cancelled/Interrupted; crash-active rows normalize to
+  Interrupted on Start; recovery reuses `.drmeta` (session authority unchanged).
+- **Admission (§9/§11):** FIFO by QueuePosition within Priority; bulk import in
+  one transaction with per-line validation + summary; no dedup (independent jobs).
+  ActiveDownloadLimit default 3 (1/2/3/4/8 supported); only active jobs own
+  runtimes/sessions — 10k queued rows cost zero sessions and ~zero DB traffic.
+- **Budgets (§12/§13/§15):** global 16 + per-host 8 (configurable, never
+  `int.MaxValue` as policy). Enforcement is per transfer attempt inside
+  `DownloadSession` via `INetworkPermitGate` (global-first, host-second; released
+  in `finally` before any backoff). Never held across pause/checkpoint/backoff/
+  finalize/parking. Fairness = bounded per-job conns × shared FIFO-ish semaphores;
+  aggregate scales to disk/server bounds (see BASELINE).
+- **Host keying (§14):** `scheme://host[:port]` with default-port elision,
+  case-insensitive, IPv6-safe. Attributed per request from the job URL; a
+  redirect is served within the single request's permit (bounded leak, documented).
+- **Failure isolation (§17, F-05):** per-job try/catch + terminal mapping; a 404
+  fails only its job with reason; scheduler loop never stops on a job fault.
+- **Progress (§18/§25):** SQLite holds informational summaries only (`.drmeta`
+  remains the byte authority). Persisted ≤ every `ProgressPersistInterval` (2 s);
+  UI events coalesced ≤ ~4/s. No per-read persistence.
+- **Shutdown (§20) / cancel-vs-remove (§21):** Stop = stop admitting + teardown
+  preserving files + persist Interrupted + settle bounded; never deletes partials.
+  Pause/shutdown preserve; Cancel drops partials (engine semantics) and marks
+  Cancelled; Remove deletes part/meta but never final user files.
+- **Retries (§22):** session-level transient policy unchanged; scheduler performs
+  NO automatic requeue (no retry storms); manual `RetryJobAsync` gated by
+  `MaxJobAttempts` (default 3) and touches only that job. Permanent errors (404)
+  stay Failed until the user retries.
+- **Power (§37):** `SchedulerPowerManager` ref-counts active jobs; sleep prevention
+  held while ≥1 active, released at zero (replaces per-transition toggling races).
+- **Part-claim registry (F-16, found by T-SCHED-02/09):** concurrent same-filename
+  sessions never share a `.part`: live claims (`ConcurrentDictionary`, case-
+  insensitive full-path keys) force `ResolveClaimFreePath` allocation (always
+  advances, even when the final doesn't exist yet) + `CreateNew` atomic creation.
+  Resume still reuses validated parts across restarts (claims are process-local).
+- **Finalize retry:** final checkpoint retries ≤3 on filesystem faults (transient
+  AV locks under parallel load); persistent faults still throw the ORIGINAL
+  exception via `ExceptionDispatchInfo` (T-CKPT-10 green: `Win32Exception` intact).
+- **UI (§23/§24):** thin host — `QueueRow` models, Dispatcher marshaling only in
+  MainWindow, EMA speed, throttled events. No Dispatcher in engine/scheduler.
+
+*End of ARCHITECTURE.md.*
+
 *End of ARCHITECTURE.md.*

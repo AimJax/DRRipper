@@ -196,6 +196,55 @@ namespace DRRipper
         // Temp paths of generations currently alive (claimed, not yet settled).
         // The stray sweep must never delete these.
         private readonly HashSet<string> _liveTemps = new(StringComparer.OrdinalIgnoreCase);
+        // Live part-file claims (Ticket #005): concurrent same-filename sessions in
+        // this process never share a .part. Resume claims the part; fresh starts
+        // uniquify while the path is claimed. Released on Dispose/Cancel/Finalize.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> s_liveParts = new(StringComparer.OrdinalIgnoreCase);
+        private string? _claimedPartKey;
+        private static string PartClaimKey(string partPath)
+        {
+            try { return Path.GetFullPath(partPath); } catch { return partPath; }
+        }
+        private bool TryClaimPart(string partPath)
+        {
+            var k = PartClaimKey(partPath);
+            if (_claimedPartKey != null && string.Equals(_claimedPartKey, k, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (s_liveParts.TryAdd(k, 0)) { _claimedPartKey = k; return true; }
+            return false;
+        }
+        private static bool IsPartClaimed(string partPath)
+        {
+            try { return s_liveParts.ContainsKey(PartClaimKey(partPath)); } catch { return false; }
+        }
+        private void ReleasePartClaim()
+        {
+            try { if (_claimedPartKey != null) s_liveParts.TryRemove(_claimedPartKey, out _); } catch { }
+            _claimedPartKey = null;
+        }
+
+        // Process-wide file-allocation lock (Ticket #005): Prepare's claim check
+        // plus Create/Open must be atomic across sessions, otherwise two fresh
+        // sessions can both observe "no part" and share (then delete) one .part.
+        // All sections under this lock are synchronous local IO (never network).
+        private static readonly object s_fileAllocLock = new();
+
+        /// <summary>
+        /// Atomic Prepare + Create/Open sequence for run startup. Returns the
+        /// Prepare result; on collision-race failure the caller uniquifies and retries.
+        /// </summary>
+        private PrepareResult PrepareAndAllocate()
+        {
+            lock (s_fileAllocLock)
+            {
+                var prep = Prepare();
+                if (prep.AdoptedFinal) return prep;
+                if (!prep.Resume)
+                    CreateFreshFile();
+                OpenExistingFile();
+                return prep;
+            }
+        }
         /// <summary>Injectable durability + publication seams (tests only replace these).</summary>
         internal IDurableFileFlusher FileFlusher { get; set; } = new OsFileFlusher();
         internal IMetadataPublisher MetadataPublisher { get; set; } = new AtomicFilePublisher();
@@ -212,6 +261,16 @@ namespace DRRipper
         // Destination handle for the current run.
         public FileStream? DestStream;
         public SafeFileHandle? DestHandle;
+
+        /// <summary>
+        /// Scheduler network permit gate (Ticket #005 §13). When set, each transfer
+        /// attempt acquires one global + one per-host permit for the request duration
+        /// only — never held across backoff, checkpointing, finalization, or parking.
+        /// Null means ungated (single-file legacy path).
+        /// </summary>
+        public DRRipper.Scheduler.INetworkPermitGate? NetworkGate;
+        /// <summary>Host key for budget attribution. Defaults to Url's normalized origin.</summary>
+        public string? NetworkHostKey;
 
         public DownloadSession(ParallelDownloader owner, HttpClient client)
         {
@@ -300,6 +359,15 @@ namespace DRRipper
                 string? problem = ValidateForResume(meta, partExists, partLength);
                 if (problem == null)
                 {
+                    // Ticket #005: never share a live .part with a concurrent session
+                    // (independent duplicate jobs). If claimed, fall through to the
+                    // fresh-start uniquify path below instead of resuming shared bytes.
+                    if (!TryClaimPart(PartPath))
+                    {
+                        StatusNote = "part-busy: partial file is owned by a concurrent download; allocating an independent file.";
+                    }
+                    else
+                    {
                     // Validated resume: reconstruct coverage WITHOUT recreating the file.
                     // Cross-mode resumes are supported: segmented snapshots yield a
                     // contiguous prefix for prefix runs and vice versa (§11).
@@ -335,10 +403,11 @@ namespace DRRipper
                     }
                     StatusNote = $"Resumed {Owner.ReadDownloaded()} of {TotalSize} verified bytes.";
                     return new PrepareResult(true, false, StatusNote);
+                    }
                 }
 
                 // Adopt-final: crash between rename and metadata delete.
-                if (problem.StartsWith("part-missing", StringComparison.Ordinal) &&
+                if (problem != null && problem.StartsWith("part-missing", StringComparison.Ordinal) &&
                     File.Exists(FinalPath) && meta.CompletedRanges.Count > 0)
                 {
                     try
@@ -354,12 +423,24 @@ namespace DRRipper
                     catch { }
                 }
 
-                StatusNote = problem;
+                StatusNote = problem ?? "unrecoverable; starting fresh.";
             }
 
             // Fresh start: never truncate a legitimate partial download silently here;
             // stale part/meta from an UNRECOVERABLE run are ours to discard, but an
             // unrelated final file is never overwritten (unique name instead).
+            // Ticket #005: a LIVE-claimed part belongs to a concurrent session —
+            // uniquify instead of deleting another job's data. Stale unclaimed parts
+            // (crashed unrecoverable runs) are still safe to discard.
+            ReleasePartClaim();
+            int guard = 0;
+            while (IsPartClaimed(PartPath) && guard++ < 1000)
+            {
+                FinalPath = ResolveClaimFreePath(FinalPath);
+                PartPath = FinalPath + ".part";
+                MetaPath = PartPath + ".drmeta";
+                partExists = File.Exists(PartPath);
+            }
             if (partExists) { try { File.Delete(PartPath); } catch { } }
             RecoveryMetadata.DeleteAll(MetaPath);
             if (File.Exists(FinalPath)) FinalPath = ResolveUniquePath(FinalPath);
@@ -432,6 +513,29 @@ namespace DRRipper
             return Path.Combine(dir, $"{stem} ({Guid.NewGuid():N}){ext}");
         }
 
+        /// <summary>
+        /// Ticket #005: always advances to a fresh candidate whose final, part,
+        /// and live-claim are all free — even when the current final does not
+        /// exist on disk yet (concurrent same-name sessions). Never returns the
+        /// input path.
+        /// </summary>
+        public static string ResolveClaimFreePath(string finalPath)
+        {
+            var dir = Path.GetDirectoryName(finalPath) ?? ".";
+            var stem = Path.GetFileNameWithoutExtension(finalPath);
+            var ext = Path.GetExtension(finalPath);
+            // Strip a previous " (N)" suffix so retries advance instead of nesting.
+            var baseStem = System.Text.RegularExpressions.Regex.Replace(stem, @" \(\d+\)$", string.Empty);
+            if (string.IsNullOrWhiteSpace(baseStem)) baseStem = stem;
+            for (int i = 2; i < 100000; i++)
+            {
+                var cand = Path.Combine(dir, $"{baseStem} ({i}){ext}");
+                if (!File.Exists(cand) && !File.Exists(cand + ".part") && !IsPartClaimed(cand + ".part"))
+                    return cand;
+            }
+            return Path.Combine(dir, $"{baseStem} ({Guid.NewGuid():N}){ext}");
+        }
+
         public void RebuildMissingQueue()
         {
             var q = new System.Collections.Concurrent.ConcurrentQueue<(long Start, long End, long CreditStart)>();
@@ -450,16 +554,56 @@ namespace DRRipper
 
         public void CreateFreshFile()
         {
-            ParallelDownloader.EnsureEnoughDiskSpace(TargetDirectory, TotalSize);
-            using (var fs = new FileStream(PartPath, FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite))
-                fs.SetLength(TotalSize);
-            Tracker = new RangeTracker(TotalSize);
-            RebuildMissingQueue();
-            PrefixOffset = 0;
+            // Ticket #005: atomic part claim. CreateNew fails if a concurrent
+            // session won the same path; uniquify and retry instead of truncating
+            // another job's data. Bounded retries (pathological guard).
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                if (IsPartClaimed(PartPath))
+                {
+                    FinalPath = ResolveClaimFreePath(FinalPath);
+                    PartPath = FinalPath + ".part";
+                    MetaPath = PartPath + ".drmeta";
+                    continue;
+                }
+                ParallelDownloader.EnsureEnoughDiskSpace(TargetDirectory, TotalSize);
+                try
+                {
+                    using (var fs = new FileStream(PartPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite))
+                        fs.SetLength(TotalSize);
+                }
+                catch (IOException) when (File.Exists(PartPath) || IsPartClaimed(PartPath))
+                {
+                    FinalPath = ResolveClaimFreePath(FinalPath);
+                    PartPath = FinalPath + ".part";
+                    MetaPath = PartPath + ".drmeta";
+                    continue;
+                }
+                if (!TryClaimPart(PartPath))
+                {
+                    // Lost the claim race after creating: remove our file only if
+                    // it is still ours (length matches fresh preallocation) — never
+                    // touch a file another session has since adopted.
+                    try { if (File.Exists(PartPath)) File.Delete(PartPath); } catch { }
+                    FinalPath = ResolveClaimFreePath(FinalPath);
+                    PartPath = FinalPath + ".part";
+                    MetaPath = PartPath + ".drmeta";
+                    continue;
+                }
+                Tracker = new RangeTracker(TotalSize);
+                RebuildMissingQueue();
+                PrefixOffset = 0;
+                return;
+            }
+            throw new DownloadFailedException("Could not allocate an independent partial file after 100 attempts (concurrent filename contention).");
         }
 
         public void OpenExistingFile()
         {
+            // Resume path already claimed in Prepare; re-entrant claim here guards
+            // the narrow Prepare→Open race with a concurrent allocator.
+            if (!TryClaimPart(PartPath))
+                throw new IOException($"Partial file is owned by a concurrent download: {PartPath}");
             DestStream = new FileStream(PartPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite, 4096, FileOptions.Asynchronous);
             DestHandle = DestStream.SafeFileHandle;
             if (DestHandle == null || DestHandle.IsInvalid)
@@ -861,8 +1005,12 @@ namespace DRRipper
             PauseToken.Resume();
             try { SessionCts?.Cancel(); } catch { }
             // Cancel drops the partial download entirely (documented): never resume-cancelled bytes.
-            try { if (File.Exists(PartPath)) File.Delete(PartPath); } catch { }
-            RecoveryMetadata.DeleteAll(MetaPath);
+            lock (s_fileAllocLock)
+            {
+                try { if (File.Exists(PartPath)) File.Delete(PartPath); } catch { }
+                RecoveryMetadata.DeleteAll(MetaPath);
+                ReleasePartClaim();
+            }
             Owner.SetState(DownloadState.Cancelled);
         }
 
@@ -904,6 +1052,7 @@ namespace DRRipper
             try { DestStream?.Dispose(); } catch { }
             DestStream = null;
             DestHandle = null;
+            ReleasePartClaim();
             try { SessionCts?.Dispose(); } catch { }
             SessionCts = null;
         }
@@ -926,17 +1075,37 @@ namespace DRRipper
                 return await RunPrefixAsync();
             }
 
-            var prep = Prepare();
+            // Ticket #005: allocation is atomic via PrepareAndAllocate (claim check +
+            // create/open under one process-wide lock). The bounded retry below is
+            // belt-and-braces for a residual open race; phantom resume accounting
+            // from an abandoned attempt is reset before retry (no bytes flowed).
+            PrepareResult prep;
+            for (int openAttempt = 0; ; openAttempt++)
+            {
+                try
+                {
+                    prep = PrepareAndAllocate();
+                    break;
+                }
+                catch (IOException ex) when (openAttempt < 10 && ex.Message.Contains("concurrent"))
+                {
+                    try { DestStream?.Dispose(); } catch { }
+                    DestStream = null; DestHandle = null;
+                    ReleasePartClaim();
+                    Owner.ResetDownloaded(0);
+                    Tracker = null;
+                    FinalPath = ResolveClaimFreePath(FinalPath);
+                    PartPath = FinalPath + ".part";
+                    MetaPath = PartPath + ".drmeta";
+                    continue;
+                }
+            }
             if (prep.AdoptedFinal)
             {
                 Owner.SetResolvedFileName(Path.GetFileName(FinalPath));
                 Owner.SetState(DownloadState.Completed, "Recovered completed file.");
                 return FinalPath;
             }
-            if (!prep.Resume)
-                CreateFreshFile();
-
-            OpenExistingFile();
             try { Checkpoint(true, TimeSpan.FromSeconds(30)); } catch { } // session-start snapshot (empty or resumed state)
             try { SessionCts?.Dispose(); } catch { }
             SessionCts = CancellationTokenSource.CreateLinkedTokenSource(ExternalToken);
@@ -1149,16 +1318,19 @@ namespace DRRipper
             // Fresh CTS: the previous one was cancelled to stop workers (fallback path).
             SessionCts = CancellationTokenSource.CreateLinkedTokenSource(ExternalToken);
             SessionCt = SessionCts.Token;
-            try { if (File.Exists(PartPath)) File.Delete(PartPath); } catch { }
-            RecoveryMetadata.DeleteAll(MetaPath);
-            Recovered = false;
+            lock (s_fileAllocLock)
+            {
+                try { if (File.Exists(PartPath)) File.Delete(PartPath); } catch { }
+                RecoveryMetadata.DeleteAll(MetaPath);
+                Recovered = false;
 
-            Tracker = new RangeTracker(TotalSize);
-            RebuildMissingQueue();
-            PrefixOffset = 0;
-            Owner.ResetDownloaded(0);
-            CreateFreshFile();
-            OpenExistingFile();
+                Tracker = new RangeTracker(TotalSize);
+                RebuildMissingQueue();
+                PrefixOffset = 0;
+                Owner.ResetDownloaded(0);
+                CreateFreshFile();
+                OpenExistingFile();
+            }
         }
 
         // ---------- strict chunk transfer (moved from Ticket #003, session-owned + settled reads) ----------
@@ -1233,10 +1405,23 @@ namespace DRRipper
                     // Attempt slot: held only while transferring or backing off
                     // outside parking, so Pause() acknowledgement always settles.
                     Interlocked.Increment(ref ActiveAttempts);
+                    IDisposable? netPermit = null;
                     try
                     {
                         perReq = CancellationTokenSource.CreateLinkedTokenSource(SessionCt);
                         try { ActiveRequests.AddOrUpdate(reqStart, perReq, (_, _) => perReq); } catch { }
+
+                        // Ticket #005 §13: one global + one per-host permit per transfer
+                        // attempt, held for the request duration only (never backoff).
+                        if (NetworkGate != null)
+                        {
+                            var hk = NetworkHostKey;
+                            if (string.IsNullOrEmpty(hk))
+                            {
+                                try { hk = Scheduler.ConnectionBudget.NormalizeHostKey(Url); } catch { hk = "unknown"; }
+                            }
+                            netPermit = await NetworkGate.AcquireAsync(hk, perReq.Token);
+                        }
 
                         using var req = new HttpRequestMessage(HttpMethod.Get, Url);
                         req.Headers.Range = new RangeHeaderValue(reqStart, reqEnd);
@@ -1367,6 +1552,8 @@ namespace DRRipper
                     }
                     finally
                     {
+                        try { netPermit?.Dispose(); } catch { }
+                        netPermit = null;
                         try { ActiveRequests.TryRemove(reqStart, out _); } catch { }
                         try { perReq?.Dispose(); } catch { }
                         Interlocked.Decrement(ref ActiveAttempts);
@@ -1408,10 +1595,22 @@ namespace DRRipper
                     TimeSpan? attemptRetryAfter = null;
                     TimeSpan? backoffDelay = null;
                     CancellationTokenSource? perReq = null;
+                    IDisposable? netPermit = null;
                     try
                     {
                         perReq = CancellationTokenSource.CreateLinkedTokenSource(SessionCt);
                         try { ActiveRequests.AddOrUpdate(-1, perReq, (_, _) => perReq); } catch { }
+
+                        // Ticket #005 §13: permit per transfer attempt only.
+                        if (NetworkGate != null)
+                        {
+                            var hk = NetworkHostKey;
+                            if (string.IsNullOrEmpty(hk))
+                            {
+                                try { hk = Scheduler.ConnectionBudget.NormalizeHostKey(Url); } catch { hk = "unknown"; }
+                            }
+                            netPermit = await NetworkGate.AcquireAsync(hk, perReq.Token);
+                        }
 
                         using var req = new HttpRequestMessage(HttpMethod.Get, Url);
                         if (PrefixOffset > 0)
@@ -1540,7 +1739,7 @@ namespace DRRipper
                         // request entry (ack must always settle).
                         backoffDelay = policy.ComputeDelay(consecutiveFailures, attemptRetryAfter);
                     }
-                    finally { try { ActiveRequests.TryRemove(-1, out _); } catch { } try { perReq?.Dispose(); } catch { } }
+                    finally { try { netPermit?.Dispose(); } catch { } try { ActiveRequests.TryRemove(-1, out _); } catch { } try { perReq?.Dispose(); } catch { } }
                     if (backoffDelay is { } backoff)
                     {
                         if (!await DelayWithPauseAsync(backoff, PauseGeneration))
@@ -1554,12 +1753,42 @@ namespace DRRipper
 
         private void OpenOrCreatePrefixFile()
         {
+            lock (s_fileAllocLock)
+            {
+                OpenOrCreatePrefixFileLocked();
+            }
+        }
+
+        private void OpenOrCreatePrefixFileLocked()
+        {
             if (TotalSize > 0 && Recovered && File.Exists(PartPath))
             {
                 OpenExistingFile();
                 return;
             }
-            using (var fs = new FileStream(PartPath, FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite)) { }
+            // Ticket #005: uniquify while live-claimed (concurrent same-name prefix).
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                if (IsPartClaimed(PartPath))
+                {
+                    FinalPath = ResolveClaimFreePath(FinalPath);
+                    PartPath = FinalPath + ".part";
+                    MetaPath = PartPath + ".drmeta";
+                    continue;
+                }
+                try
+                {
+                    using (var fs = new FileStream(PartPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite)) { }
+                }
+                catch (IOException) when (File.Exists(PartPath) || IsPartClaimed(PartPath))
+                {
+                    FinalPath = ResolveClaimFreePath(FinalPath);
+                    PartPath = FinalPath + ".part";
+                    MetaPath = PartPath + ".drmeta";
+                    continue;
+                }
+                break;
+            }
             if (TotalSize > 0)
             {
                 ParallelDownloader.EnsureEnoughDiskSpace(TargetDirectory, TotalSize);
@@ -1575,12 +1804,15 @@ namespace DRRipper
             Owner.SetState(DownloadState.Downloading, reason);
             try { DestStream?.Dispose(); } catch { }
             DestStream = null; DestHandle = null;
-            try { if (File.Exists(PartPath)) File.Delete(PartPath); } catch { }
-            RecoveryMetadata.DeleteAll(MetaPath);
-            Recovered = false;
-            PrefixOffset = 0;
-            Owner.ResetDownloaded(0);
-            OpenOrCreatePrefixFile();
+            lock (s_fileAllocLock)
+            {
+                try { if (File.Exists(PartPath)) File.Delete(PartPath); } catch { }
+                RecoveryMetadata.DeleteAll(MetaPath);
+                Recovered = false;
+                PrefixOffset = 0;
+                Owner.ResetDownloaded(0);
+                OpenOrCreatePrefixFileLocked();
+            }
         }
 
         private static bool IsRetryableStatus(int sc) => sc is 408 or 429 or 500 or 502 or 503 or 504 or (>= 500 and <= 599);
@@ -1593,7 +1825,24 @@ namespace DRRipper
             lock (_phaseLock) { Phase = SessionPhase.Verifying; }
             Owner.SetState(DownloadState.Downloading, "Verifying…");
             SessionCt.ThrowIfCancellationRequested();
-            Checkpoint(true, TimeSpan.FromSeconds(120)); // final flush + snapshot
+            // Final flush + snapshot (Ticket #005: bounded retries for transient
+            // filesystem locks, e.g. AV scanners racing the metadata move under
+            // parallel load. Persistent faults still fail loudly after 3 attempts —
+            // never a false durable Completed. T-CKPT-10 covers the loud path.)
+            Exception? finalCkptFault = null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                SessionCt.ThrowIfCancellationRequested();
+                try { Checkpoint(true, TimeSpan.FromSeconds(120)); finalCkptFault = null; break; }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    finalCkptFault = ex;
+                    try { await Task.Delay(TimeSpan.FromMilliseconds(500), SessionCt); } catch { }
+                }
+            }
+            if (finalCkptFault != null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(finalCkptFault).Throw();
             try { DestStream?.Dispose(); } catch { }
             DestStream = null; DestHandle = null;
 
@@ -1616,6 +1865,7 @@ namespace DRRipper
             if (!moved)
                 throw new DownloadFailedException($"Could not finalize destination '{FinalPath}': rename failed.");
             RecoveryMetadata.DeleteAll(MetaPath);
+            ReleasePartClaim();
             lock (_phaseLock) { Phase = SessionPhase.Terminal; }
             Owner.SetResolvedFileName(Path.GetFileName(FinalPath));
             Owner.SetState(DownloadState.Completed);

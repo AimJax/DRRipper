@@ -1,265 +1,320 @@
 using System;
+using System.Collections.ObjectModel;
 using System.IO;
-using System.Threading;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using DRRipper.Scheduler;
 
 namespace DRRipper
 {
+    /// <summary>
+    /// Thin scheduler host (Ticket #005 §23): owns the persistent DownloadScheduler,
+    /// marshals its UI-framework-independent events onto the Dispatcher, and binds
+    /// lightweight QueueRows. No transfer logic lives here. Full MVVM is a later milestone.
+    /// </summary>
     public partial class MainWindow : Window
     {
-        private CancellationTokenSource? _cts;
-        private ParallelDownloader? _downloader;
+        private JobStore? _store;
+        private DownloadScheduler? _scheduler;
+        private readonly ObservableCollection<QueueRow> _rows = new();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (long Bytes, DateTimeOffset At, double Speed)> _speeds = new();
+        private bool _closing;
 
         public MainWindow()
         {
             InitializeComponent();
             try
             {
-                var defaultDownloads = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+                var defaultDownloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
                 if (PathTextBox != null && string.IsNullOrWhiteSpace(PathTextBox.Text))
                     PathTextBox.Text = defaultDownloads;
             }
             catch { }
-
-            UpdateButtonsForState(DownloadState.Idle);
+            if (QueueListView != null) QueueListView.ItemsSource = _rows;
+            Loaded += MainWindow_Loaded;
+            Closing += MainWindow_Closing;
         }
 
-        private async void StartButton_Click(object sender, RoutedEventArgs e)
+        private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
-            // direct XAML field references (strongly-typed)
-            var urlTextBox = UrlTextBox;
-            var startButton = StartButton;
-
-            // Batch parsing will validate individual lines; do not pre-validate the whole textbox here.
-
-            // Toggle Pause/Resume if active
-            if (_downloader != null)
-            {
-                var st = _downloader.GetState();
-                if (st == DownloadState.Downloading)
-                {
-                    _downloader.Pause();
-                    return;
-                }
-                else if (st == DownloadState.Paused || st == DownloadState.Retrying)
-                {
-                    _downloader.Resume();
-                    return;
-                }
-            }
-
-            if (startButton != null) startButton.IsEnabled = false;
-
             try
             {
-                var saveDir = (PathTextBox != null && !string.IsNullOrWhiteSpace(PathTextBox.Text) && Directory.Exists(PathTextBox.Text))
-                    ? PathTextBox.Text
-                    : System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
-
-                // Build list of URLs from multi-line textbox
-                var urlsRaw = UrlTextBox?.Text ?? string.Empty;
-                var lines = urlsRaw.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                var list = new System.Collections.Generic.List<string>();
-                foreach (var ln in lines)
+                var dbPath = SchedulerPaths.DefaultDatabasePath();
+                _store = await JobStore.CreateAsync(dbPath);
+                _scheduler = new DownloadScheduler(_store, new SchedulerSettings
                 {
-                    var l = ln.Trim();
-                    if (string.IsNullOrWhiteSpace(l)) continue;
-                    if (!l.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !l.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                        l = "https://" + l;
-                    if (Uri.IsWellFormedUriString(l, UriKind.Absolute))
-                        list.Add(l);
-                }
-
-                if (list.Count == 0)
-                {
-                    System.Windows.MessageBox.Show("No valid URLs found.", "DRRipper", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-
-                _cts = new CancellationTokenSource();
-
-                // Batch tracking variables
-                long completedFilesTotalSize = 0;
-                int totalFiles = list.Count;
-
-                // Create a single downloader for the entire batch to preserve connection pooling, DNS caching, and TLS sessions
-                try { _downloader?.Dispose(); } catch { }
-                _downloader = new ParallelDownloader();
-                _downloader.StateChanged += st => Dispatcher.Invoke(() => UpdateButtonsForState(st));
-
-                int currentIndex = 0;
-                string currentUrl = string.Empty;
-
-                _downloader.ProgressChanged += progress => Dispatcher.Invoke(() =>
-                {
-                    // Per-file progress: show current file percentage and bytes
-                    if (OverallProgressBar != null) OverallProgressBar.Value = progress.ProgressPercentage;
-                    if (SpeedLabel != null) SpeedLabel.Text = $"{progress.CurrentSpeedMBps:F2} MB/s";
-                    if (BytesLabel != null) BytesLabel.Text = $"{FormatBytes(progress.TotalBytesDownloaded)} / {(progress.TotalBytes>0?FormatBytes(progress.TotalBytes):"?")}";
-                    if (StateLabel != null)
-                    {
-                        var displayName = progress.ResolvedFileName ?? new Uri(currentUrl).Segments[^1];
-                        StateLabel.Text = $"[{currentIndex+1}/{totalFiles}] {progress.StatusMessage} ({displayName})";
-                    }
+                    ActiveDownloadLimit = 3,
+                    GlobalConnectionBudget = 16,
+                    PerHostConnectionBudget = 8,
                 });
-
-                for (int i = 0; i < list.Count; i++)
-                {
-                    if (_cts.IsCancellationRequested) break;
-                    currentUrl = list[i];
-                    currentIndex = i;
-
-
-                    UpdateButtonsForState(DownloadState.Downloading);
-
-                    try
-                    {
-                        var finalPath = await _downloader.StartAsync(currentUrl, saveDir, 8, _cts.Token);
-                        // file completed: add its final file size into completedFilesTotalSize
-                        try
-                        {
-                            long finalSize = 0;
-                            try { finalSize = new FileInfo(finalPath).Length; } catch { }
-                            completedFilesTotalSize += finalSize;
-                        }
-                        catch { }
-
-                        Dispatcher.Invoke(() =>
-                        {
-                            if (StateLabel != null) StateLabel.Text = $"[{currentIndex+1}/{totalFiles}] Completed ({System.IO.Path.GetFileName(finalPath)})";
-                            if (OverallProgressBar != null) OverallProgressBar.Value = 100.0;
-                            if (BytesLabel != null)
-                            {
-                                try { BytesLabel.Text = $"{FormatBytes(new FileInfo(finalPath).Length)} / {FormatBytes(new FileInfo(finalPath).Length)}"; } catch { }
-                            }
-                        });
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                }
-
-                // Only mark as Completed if the operation wasn't cancelled
-                if (_cts == null || !_cts.IsCancellationRequested)
-                    UpdateButtonsForState(DownloadState.Completed);
-            }
-            catch (OperationCanceledException)
-            {
-                Dispatcher.Invoke(() =>
-                {
-                    if (StateLabel != null) StateLabel.Text = "Cancelled";
-                });
-                UpdateButtonsForState(DownloadState.Cancelled);
+                _scheduler.JobAdded += OnJobAdded;
+                _scheduler.JobUpdated += OnJobUpdated;
+                _scheduler.JobRemoved += OnJobRemoved;
+                _scheduler.JobProgress += OnJobProgress;
+                await _scheduler.StartAsync();
+                await RefreshAllAsync();
+                SetStatus("Queue ready.");
             }
             catch (Exception ex)
             {
-                Dispatcher.Invoke(() => System.Windows.MessageBox.Show($"Download failed: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error));
-                UpdateButtonsForState(DownloadState.Failed);
+                System.Windows.MessageBox.Show($"Queue database failed to open:{Environment.NewLine}{ex.Message}", "DRRipper", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+                SetStatus("Queue unavailable.");
             }
-            finally
+        }
+
+        private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+        {
+            if (_closing) return;
+            _closing = true;
+            // Orderly shutdown preserves partials for resume (§20). Brief wait only.
+            try
             {
-                if (startButton != null) startButton.IsEnabled = true;
-                // Ensure downloader disposed and resources freed when loop completes
-                try { _downloader?.Dispose(); } catch { }
-                _downloader = null;
-                try { _cts?.Dispose(); } catch { }
-                _cts = null;
+                if (_scheduler != null)
+                {
+                    var stop = _scheduler.StopAsync();
+                    var winner = await Task.WhenAny(stop, Task.Delay(TimeSpan.FromSeconds(10)));
+                }
             }
+            catch { }
+            try { _scheduler?.Dispose(); } catch { }
+            try { _store?.Dispose(); } catch { }
+        }
+
+        // ---------- scheduler event marshaling (Dispatcher only here, never in engine) ----------
+
+        private void OnJobAdded(object? s, DownloadJob job) =>
+            Dispatcher.BeginInvoke(() => UpsertRow(job));
+
+        private void OnJobUpdated(object? s, DownloadJob job) =>
+            Dispatcher.BeginInvoke(() => UpsertRow(job));
+
+        private void OnJobRemoved(object? s, Guid jobId) =>
+            Dispatcher.BeginInvoke(() =>
+            {
+                var row = _rows.FirstOrDefault(r => r.JobId == jobId);
+                if (row != null) _rows.Remove(row);
+                _speeds.TryRemove(jobId, out _);
+                UpdateSummary();
+            });
+
+        private void OnJobProgress(object? s, JobProgressEvent p) =>
+            Dispatcher.BeginInvoke(() =>
+            {
+                var row = _rows.FirstOrDefault(r => r.JobId == p.JobId);
+                if (row == null) return;
+                var now = DateTimeOffset.UtcNow;
+                double speed = 0.0;
+                if (_speeds.TryGetValue(p.JobId, out var prev) && prev.Bytes <= p.CompletedBytes)
+                {
+                    var dt = (now - prev.At).TotalSeconds;
+                    if (dt > 0.2)
+                    {
+                        var inst = (p.CompletedBytes - prev.Bytes) / 1024.0 / 1024.0 / dt;
+                        speed = prev.Speed * 0.7 + Math.Max(0.0, inst) * 0.3;
+                    }
+                    else speed = prev.Speed;
+                }
+                _speeds[p.JobId] = (p.CompletedBytes, now, speed);
+                row.Progress = p.TotalBytes.GetValueOrDefault() > 0
+                    ? Math.Clamp(p.CompletedBytes * 100.0 / p.TotalBytes!.Value, 0.0, 100.0) : row.Progress;
+                row.Bytes = $"{FormatBytes(p.CompletedBytes)} / {(p.TotalBytes > 0 ? FormatBytes(p.TotalBytes!.Value) : "?")}";
+                row.Speed = $"{Math.Max(0.0, speed):F2} MB/s";
+            });
+
+        private void UpsertRow(DownloadJob job)
+        {
+            var row = _rows.FirstOrDefault(r => r.JobId == job.JobId);
+            double speed = _speeds.TryGetValue(job.JobId, out var s) ? s.Speed : 0.0;
+            if (row == null)
+            {
+                _rows.Add(QueueRow.FromJob(job));
+            }
+            else
+            {
+                row.Apply(job, speed);
+            }
+            // Keep FIFO display order.
+            var ordered = _rows.OrderBy(r => r.JobId).ToList();
+            UpdateSummary();
+        }
+
+        private async Task RefreshAllAsync()
+        {
+            if (_scheduler == null) return;
+            var all = await _scheduler.GetAllJobsAsync();
+            _rows.Clear();
+            foreach (var j in all.OrderBy(j => j.Priority).ThenBy(j => j.QueuePosition))
+                _rows.Add(QueueRow.FromJob(j));
+            UpdateSummary();
+        }
+
+        private void UpdateSummary()
+        {
+            if (QueueSummaryLabel == null) return;
+            int active = 0, done = 0;
+            foreach (var r in _rows)
+            {
+                if (r.Status.StartsWith("Downloading", StringComparison.Ordinal)) active++;
+                if (r.Status.StartsWith("Completed", StringComparison.Ordinal)) done++;
+            }
+            QueueSummaryLabel.Text = $"{_rows.Count} jobs ({active} active, {done} done)";
+        }
+
+        private void SetStatus(string text)
+        {
+            try { if (StateLabel != null) StateLabel.Text = text; } catch { }
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            const long KB = 1024, MB = KB * 1024, GB = MB * 1024;
+            if (bytes >= GB) return $"{(double)bytes / GB:0.##} GB";
+            if (bytes >= MB) return $"{(double)bytes / MB:0.##} MB";
+            if (bytes >= KB) return $"{(double)bytes / KB:0.##} KB";
+            return bytes + " B";
+        }
+
+        // ---------- commands ----------
+
+        private async void AddButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_scheduler == null) { SetStatus("Queue not ready."); return; }
+            var saveDir = (PathTextBox != null && !string.IsNullOrWhiteSpace(PathTextBox.Text))
+                ? PathTextBox.Text.Trim() : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+            try { Directory.CreateDirectory(saveDir); } catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"Cannot use save folder:{Environment.NewLine}{ex.Message}", "DRRipper", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+                return;
+            }
+            var text = UrlTextBox?.Text ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                System.Windows.MessageBox.Show("Enter one URL per line.", "DRRipper", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+                return;
+            }
+            try
+            {
+                var result = await _scheduler.ImportAsync(text, saveDir, connectionsPerFile: 8);
+                SetStatus($"Added {result.Accepted}, rejected {result.Rejected}.");
+                if (result.Rejected > 0)
+                    System.Windows.MessageBox.Show($"Accepted {result.Accepted}, rejected {result.Rejected}.{Environment.NewLine}{string.Join(Environment.NewLine, result.Errors.Take(10))}",
+                        "DRRipper", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"Import failed: {ex.Message}", "DRRipper", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+            }
+        }
+
+        private System.Collections.Generic.List<Guid> SelectedIds()
+        {
+            var ids = new System.Collections.Generic.List<Guid>();
+            try
+            {
+                foreach (var item in QueueListView.SelectedItems)
+                    if (item is QueueRow r) ids.Add(r.JobId);
+            }
+            catch { }
+            return ids;
+        }
+
+        private async void PauseResumeButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_scheduler == null) return;
+            foreach (var id in SelectedIds())
+            {
+                try
+                {
+                    var job = await _scheduler.GetJobAsync(id);
+                    if (job == null) continue;
+                    if (job.State == JobState.Paused || job.State == JobState.Interrupted)
+                        await _scheduler.ResumeJobAsync(id);
+                    else if (!job.IsTerminal)
+                        await _scheduler.PauseJobAsync(id);
+                }
+                catch { }
+            }
+        }
+
+        private async void CancelJobButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_scheduler == null) return;
+            foreach (var id in SelectedIds())
+            {
+                try { await _scheduler.CancelJobAsync(id); } catch { }
+            }
+        }
+
+        private async void RetryButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_scheduler == null) return;
+            foreach (var id in SelectedIds())
+            {
+                try { await _scheduler.RetryJobAsync(id); } catch (Exception ex)
+                {
+                    System.Windows.MessageBox.Show(ex.Message, "DRRipper", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+                }
+            }
+        }
+
+        private async void RemoveButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_scheduler == null) return;
+            var ids = SelectedIds();
+            if (ids.Count == 0) return;
+            var answer = System.Windows.MessageBox.Show($"Remove {ids.Count} job(s)? Partial files are deleted; completed files on disk are kept.",
+                "DRRipper", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Question);
+            if (answer != System.Windows.MessageBoxResult.Yes) return;
+            foreach (var id in ids)
+            {
+                try { await _scheduler.RemoveJobAsync(id); } catch { }
+            }
+        }
+
+        private async void PauseAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_scheduler == null) return;
+            try { await _scheduler.PauseAllAsync(); SetStatus("Paused all."); } catch { }
+        }
+
+        private async void ResumeAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_scheduler == null) return;
+            try { await _scheduler.ResumeAllAsync(); SetStatus("Resumed all."); } catch { }
+        }
+
+        private async void ClearDoneButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_scheduler == null) return;
+            try { await _scheduler.ClearCompletedAsync(); await RefreshAllAsync(); } catch { }
         }
 
         private void BrowseButton_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                using (var dlg = new System.Windows.Forms.FolderBrowserDialog())
-                {
-                    dlg.Description = "Select download folder";
-                    dlg.UseDescriptionForTitle = true;
-                    dlg.ShowNewFolderButton = true;
-                    if (PathTextBox != null && !string.IsNullOrWhiteSpace(PathTextBox.Text) && Directory.Exists(PathTextBox.Text))
-                        dlg.SelectedPath = PathTextBox.Text;
-
-                    var result = dlg.ShowDialog();
-                    if (result == System.Windows.Forms.DialogResult.OK)
-                    {
-                        if (PathTextBox != null)
-                            PathTextBox.Text = dlg.SelectedPath;
-                    }
-                }
+                using var dlg = new System.Windows.Forms.FolderBrowserDialog();
+                dlg.Description = "Select download folder";
+                dlg.UseDescriptionForTitle = true;
+                dlg.ShowNewFolderButton = true;
+                if (PathTextBox != null && !string.IsNullOrWhiteSpace(PathTextBox.Text) && Directory.Exists(PathTextBox.Text))
+                    dlg.SelectedPath = PathTextBox.Text;
+                if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK && PathTextBox != null)
+                    PathTextBox.Text = dlg.SelectedPath;
             }
             catch (Exception ex)
             {
-                System.Windows.MessageBox.Show($"Folder picker failed: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                System.Windows.MessageBox.Show($"Folder picker failed: {ex.Message}", "Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
             }
         }
 
-        private static string FormatBytes(long bytes)
+        private void QueueListView_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
-            const long KB = 1024;
-            const long MB = KB * 1024;
-            const long GB = MB * 1024;
-            if (bytes >= GB) return string.Format("{0:0.##} GB", (double)bytes / GB);
-            if (bytes >= MB) return string.Format("{0:0.##} MB", (double)bytes / MB);
-            if (bytes >= KB) return string.Format("{0:0.##} KB", (double)bytes / KB);
-            return bytes + " B";
-        }
-
-        private void UpdateButtonsForState(DownloadState st)
-        {
-            var startButton = StartButton;
-            var cancelButton = CancelButton;
-            if (startButton != null)
-            {
-                switch (st)
-                {
-                    case DownloadState.Idle:
-                    case DownloadState.Completed:
-                        startButton.Content = "Start Download";
-                        startButton.IsEnabled = true;
-                        break;
-                    case DownloadState.Downloading:
-                        startButton.Content = "Pause";
-                        startButton.IsEnabled = true;
-                        break;
-                    case DownloadState.Paused:
-                    case DownloadState.Retrying:
-                        startButton.Content = "Resume";
-                        startButton.IsEnabled = true;
-                        break;
-                    case DownloadState.Cancelled:
-                    case DownloadState.Failed:
-                        startButton.Content = "Start Download";
-                        startButton.IsEnabled = true;
-                        break;
-                }
-            }
-            if (cancelButton != null)
-            {
-                cancelButton.IsEnabled = st == DownloadState.Downloading || st == DownloadState.Paused || st == DownloadState.Retrying;
-            }
-        }
-
-        private void CancelButton_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _cts?.Cancel();
-                _downloader?.Cancel();
-                // Dispose downloader immediately to free timers and handlers
-                try { _downloader?.Dispose(); } catch { }
-                _downloader = null;
-            }
-            catch { }
-            Dispatcher.Invoke(() =>
-            {
-                if (OverallProgressBar != null) OverallProgressBar.Value = 0;
-                if (SpeedLabel != null) SpeedLabel.Text = "0 MB/s";
-                if (BytesLabel != null) BytesLabel.Text = "0 / 0";
-                if (StateLabel != null) StateLabel.Text = "Idle";
-                UpdateButtonsForState(DownloadState.Idle);
-            });
+            if (PauseResumeButton == null) return;
+            var first = QueueListView.SelectedItems.Count > 0 ? QueueListView.SelectedItems[0] as QueueRow : null;
+            PauseResumeButton.Content = first != null && (first.Status.StartsWith("Paused", StringComparison.Ordinal) || first.Status.StartsWith("Interrupted", StringComparison.Ordinal))
+                ? "Resume" : "Pause";
         }
     }
 }

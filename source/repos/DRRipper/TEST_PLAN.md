@@ -144,4 +144,34 @@ Suite totals after Ticket #004.1: **63 passing in the blocking lane
 (52 carried + 11 new), 0 known-failing, 0 unexpected.**
 T-STATE-04 remains the sole `Sensitive` quarantine (host-scheduling evidence in BASELINE).
 
+## 11. Ticket #005 implementation mapping (persistent bulk scheduler, 2026-10-02)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| T-SCHED-01 single job | Enqueue 2 MB → Completed, hash match | PASS |
+| T-SCHED-02 isolation | good/404/good → Completed/Failed/Completed, reason kept | PASS |
+| T-SCHED-03 active limit | Limit 2, 5 throttled jobs, max active ≤ 2 | PASS |
+| T-SCHED-04 pause one | Paused job parks; other completes; resume completes | PASS |
+| T-SCHED-05 cancel one | Cancelled job drops; other completes | PASS |
+| T-SCHED-06 retry | 500 → Failed; healed → Retry → Completed; good untouched | PASS |
+| T-SCHED-07 PauseAll/ResumeAll | All park, zero active, all resume to Completed | PASS |
+| T-SCHED-08 reorder | Reorder + eligible order follows QueuePosition | PASS |
+| T-SCHED-09 duplicates | Same URL ×2 → independent JobIds, unique finals, both hash OK | PASS |
+| T-SCHED-10 shutdown | Stop preserves part/meta; restart resumes to hash-identical file | PASS |
+| T-STORE-01…10 | Fresh create, schema v1 + idempotent reopen, queued restart, interrupted normalization, completed persistence, failure reason/attempts, 10k bulk insert, reorder persistence, future-schema explicit error, unicode roundtrip | PASS |
+| T-BUDGET-01…08 | Global cap, per-host cap, host independence, release-on-failure/cancel/pause, zero-permit backoff, no starvation + power refcount + hostkey + redaction unit tests | PASS |
+| T-STRESS-QUEUE-100/500/1000 | Full execution to Completed, exact ledger | PASS |
+| T-STRESS-QUEUE-10000 | Enqueue time, DB size, reopen time, WS idle/running, active ≤ 3 | PASS |
+| T-STRESS-MIXED | 40 good + 10×404 + 10×500 + 1 cancelled → 40/20/1 ledger + hash spot-check | PASS |
+| T-QUEUE-CRASH-01 | Abandon-without-shutdown kill, 2 active → restart resumes both via .drmeta; completed untouched | PASS |
+| T-QUEUE-CRASH-02 | Abrupt close → 50/50 rows intact, active normalized | PASS |
+| T-QUEUE-CRASH-03 | 4 concurrent finalize → all Completed, hashes match, zero part leftovers | PASS |
+
+Suite totals after Ticket #005: **102 passing in the blocking lane
+(63 carried + 39 new), 0 known-failing.** Full-suite parallel-load flakes observed
+(transient AV file locks — mitigated by bounded finalize retry; host scheduling
+stalls — documented box signature); all green in isolation and on reruns.
+
+*End of TEST_PLAN.md.*
+
 *End of TEST_PLAN.md.*
