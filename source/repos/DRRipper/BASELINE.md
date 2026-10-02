@@ -332,4 +332,15 @@ fail-loud-preserving hardenings: live-part claims, bounded finalize retry).
 ## CI
 
 - Ticket #004.1 run (#4, commit b46ad3e): **success**.
-- Ticket #005 run: pending at push time; result recorded in the final report.
+- Ticket #005 run (#5, commit 3de1ce3): **failure** — Safe-tests step failed
+  after ~4m18s (build green, logs auth-walled). Locally 101–102/102 with only
+  environmental flakes (AV locks, host stalls); scheduler tests green in
+  isolation and in-suite.
+- CI split (commit 58f89ae): safe lane runs as two sequential blocking steps
+  (engine 63 + scheduler 39) to halve peak contention on small CI runners.
+  Same tests, same blocking status — verified locally as 63 + 39 = 102.
+- Ticket #005 run (#6, commit 58f89ae): **failure** — Safe ENGINE step failed
+  after ~5.5 min (scheduler step skipped); engine lane is 63/63 green locally
+  (2m42s). Under investigation; #005 engine deltas are allocation-atomicity only
+  (§12), all locally green. Suspect: slow-runner timing marginality (precedent:
+  run #3 failed on clean code the same way).
