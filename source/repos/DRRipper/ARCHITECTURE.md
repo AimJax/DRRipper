@@ -274,4 +274,55 @@ store schema (still v1), lifecycle, and UI are untouched.
   `AND State NOT IN (5,6,7)` so late events can't touch terminal rows;
   cancel/retry/admission pass `resetProgress` for deliberate fresh attempts.
 
+## 14. Post-Ticket #006 MVVM queue UI (2026-10-03)
+
+The #005 thin code-behind host (`MainWindow` owning scheduler + rows directly,
+`Scheduler/QueueRow.cs`) is replaced by a real MVVM layer. Transfer, scheduler,
+and store internals are untouched (one additive `using` alias fix excluded).
+
+```
+Views (XAML only)            View-models (headless-testable)      Services
+MainWindow.xaml         ---> MainViewModel ──uses──▶ DownloadScheduler
+AddDownloadsDialog.xaml ---> AddDownloadsViewModel ──uses──▶ (ImportAsync)
+SettingsDialog.xaml     ---> SettingsViewModel ──uses──▶ SettingsService
+Styles/{Colors,          DownloadJobViewModel (row: state/glyph/speed/ETA)
+ Controls,DataGrid}.xaml RelayCommand/AsyncRelayCommand (no CommandManager)
+Views/Converters.cs      Formatting (bytes/rate/ETA/error, pure)
+                              │ events via IUiDispatcher
+MainWindow.xaml.cs ───────────┤ (composition root only: services, selection
+  WpfDispatcher (sole ────────┘  sync, sorting route, dialogs, shutdown)
+  Dispatcher touchpoint)
+```
+
+- **No WPF in VMs:** no Dispatcher, no `ICollectionView`, no CommandManager, no
+  visual types — `ICommand` itself lives in System.ObjectModel. The full VM
+  suite runs headless in the existing test project (`UseWPF=false`).
+- **Refresh model (§24):** scheduler progress events update rows O(1) in place;
+  one 1 s (configurable 250–5000 ms) coalesced timer recomputes aggregates,
+  ETAs, counts, permits, and command states. Event-driven view rebuilds
+  coalesce to ≤4/s during import bursts; explicit filter/sort/search/refresh
+  always rebuild immediately. No per-row timers, no per-row subscriptions.
+- **View projection (§11–13):** master `Dictionary<Guid,VM>` + replaced
+  `VisibleJobs` collection; filter buckets (Interrupted waits with Queued);
+  debounced search (250 ms) across filename/URL/host/status/path; VM-owned
+  comparers for Name/Status/Progress/Size/Speed/Added/Host. Visual sort never
+  touches `QueuePosition` — reorder commands rebuild the FULL execution order
+  preserving non-movable jobs' slots.
+- **Virtualization (§22):** DataGrid with explicit
+  `VirtualizingPanel.IsVirtualizing=True` + `VirtualizationMode=Recycling`,
+  never wrapped in a ScrollViewer; verified by an STA-constructed-window test
+  (no render needed for the attached-property proof) + manual scroll pass.
+- **Settings (§18–20):** versioned JSON at `%LOCALAPPDATA%\DRRipper\settings.json`,
+  tmp+flush+move atomic replace, corrupt/future versions fall back to defaults
+  without touching the queue. Limits/defaults/refresh apply live;
+  budgets are restart-flagged.
+- **Shutdown (§27):** Closing cancels, runs bounded `ShutdownAsync` ("Saving
+  download state…" veil), then re-closes via deferred Dispatcher `Close()`
+  (re-entrant `Close()` inside `Closing` is illegal WPF and hangs — found by
+  live smoke test, fixed, verified graceful exit).
+- **Superseded:** `Scheduler/QueueRow.cs` deleted (replaced by
+  `DownloadJobViewModel`); old sequential MainWindow loop long gone (F-05).
+
+*End of ARCHITECTURE.md.*
+
 *End of ARCHITECTURE.md.*

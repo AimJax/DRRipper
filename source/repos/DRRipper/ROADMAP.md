@@ -179,4 +179,13 @@ disposal. Progress persistence is monotonic in SQL (F-19 resolved) with
 terminal-state guards and explicit reset paths. No UI/browser/adaptive/shared-
 HttpClient work introduced; bulk scheduling behavior otherwise unchanged.
 
+## Ticket #006 status (2026-10-03)
+
+Professional MVVM queue UI delivered: MainViewModel + row/add/settings VMs,
+single-timer coalesced refresh, virtualized sortable/filterable/searchable job
+table, bulk + context-menu + reorder + open/copy workflows, versioned settings,
+orderly shutdown veil, and 20 new headless tests green. Engine, scheduler, and
+store behavior unchanged (one shutdown-correctness fix in window code only).
+No browser/media/clipboard-monitoring/adaptive work introduced.
+
 *End of ROADMAP.md.*

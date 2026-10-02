@@ -195,4 +195,27 @@ stalls — documented box signature); all green in isolation and on reruns.
 Suite totals after Ticket #005.1: **117 passing in the blocking lane
 (102 carried + 15 new: 9 HARD + 5 PROGRESS + 1 HOSTMEM), 0 known-failing.**
 
+## 13. Ticket #006 implementation mapping (MVVM queue UI, 2026-10-03)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| T-UI-VM-01 state mapping | All 9 states → text+glyph (+reason); non-color cues | PASS |
+| T-UI-VM-02 progress format | %, clamping, TB/GB/MB/KB/B, unknown | PASS |
+| T-UI-VM-03 speed format | GB/MB/KB/B per s, NaN/negative guards | PASS |
+| T-UI-VM-04 ETA rules | Unknown/stalled/trickle/absurd → "—"; s/m/h/d | PASS |
+| T-UI-VM-05 command rules | Selection-gated CanExecute matrix | PASS |
+| T-UI-VM-06 filter mapping | 7 buckets incl. Interrupted→Queued | PASS |
+| T-UI-VM-07 search | Filename/URL/host/status/path matching | PASS |
+| T-UI-VM-08 bulk isolation | Retry pair: one succeeds, one recorded, command never throws | PASS |
+| T-UI-VM-09 error redaction | Null/blank/passthrough, query-secret strip, length cap | PASS |
+| T-UI-VM-10 disposal | Post-dispose scheduler activity: no VM change, no throw | PASS |
+| T-SETTINGS-01…06 | Defaults, roundtrip, corrupt/truncated reset, future-version + clamp, torn-write atomicity + sweep, unicode | PASS |
+| T-UI-SCALE-100/1000/10000 | Model load/filter/sort/search latency + managed KB/row | PASS |
+| T-UI-XAML virtualization | STA-constructed window: virtualizing + recycling + full table | PASS |
+
+Suite totals after Ticket #006: **137 passing in the blocking lane
+(117 carried + 20 new: 10 VM + 6 settings + 3 scale + 1 XAML), 0 known-failing.**
+
+*End of TEST_PLAN.md.*
+
 *End of TEST_PLAN.md.*

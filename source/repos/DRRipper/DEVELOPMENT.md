@@ -134,3 +134,21 @@ dotnet run --project source/repos/DRRipper/DRRipper.Benchmarks -c Release -- --s
   cancel/retry/admission. `.drmeta` remains the byte authority; DB is the summary.
 - Redirect attribution unchanged (origin host key per request, bounded); shared-
   HttpClient refactor explicitly deferred.
+
+## 11. MVVM queue UI model (Ticket #006)
+
+- View-models consume `DownloadScheduler`/`DownloadJob`/events only — never
+  sessions, files, HTTP, or SQL. All scheduler callbacks arrive via
+  `IUiDispatcher` (WPF Dispatcher in prod, inline in tests).
+- `MainViewModel`: master map + replaced visible collection; filter buckets;
+  250 ms search debounce; VM comparers (visual sort ≠ queue order); selection
+  as ID set synced from the view; bulk ops with per-job isolation + summary;
+  explicit move commands rebuilding full execution order; 1 Hz coalesced refresh
+  (aggregates/ETA/counts/permits/commands); orderly `ShutdownAsync` with veil.
+- `DownloadJobViewModel`: snapshot + EMA speed + ETA; glyph+text status;
+  `CanPause/Resume/Cancel/Retry` predicates. No timers/subscriptions.
+- `AddDownloadsViewModel`: live preview counts (capped error list) + authoritative
+  `ImportAsync` submit; Add vs Add-and-Start (resumes admission).
+- `SettingsService`: versioned atomic JSON, safe fallbacks, temp-path injection.
+- Shell/clipboard/dialogs behind interfaces; safe `Process.Start` shell-execute
+  only (file must exist; folder selects via explorer; never URL-built commands).

@@ -4,6 +4,12 @@
              xmlns:local="clr-namespace:DRRipper"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-         
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/DRRipper;component/Styles/Colors.xaml" />
+                <ResourceDictionary Source="pack://application:,,,/DRRipper;component/Styles/Controls.xaml" />
+                <ResourceDictionary Source="pack://application:,,,/DRRipper;component/Styles/DataGrid.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
     </Application.Resources>
 </Application>

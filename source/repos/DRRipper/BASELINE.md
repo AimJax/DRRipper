@@ -417,3 +417,74 @@ reTx 0, admit ~0 ms, dbw ~10–16/s, CPU/WS/handles in kind with #005.
 - Ticket #005.1 follow-up runs: recorded in the final report.
 - New classes are `SchedulerBudgetHardeningTests`/`SchedulerProgressTests`, matched
   by the existing `FullyQualifiedName~Scheduler` CI filter — no filter change needed.
+
+---
+
+# Ticket #006 appendix (2026-10-03, same hardware)
+
+MVVM queue UI above untouched engine/scheduler/store (one window-shutdown
+correctness fix: deferred re-entrant `Close()`).
+
+## Build
+
+- `dotnet build DRRipper.slnx -c Release`: **0 errors**; warnings unchanged
+  (pre-existing CS0168 + NU1903). New: `UI/` (ObservableObject, RelayCommand,
+  Formatting, IUiDispatcher/WpfDispatcher, AppSettings/SettingsService,
+  DownloadJobViewModel, MainViewModel, AddDownloadsViewModel, SettingsViewModel,
+  ShellService/ClipboardService, DialogService/WpfDialogService),
+  `Views/` (converters, Add/Settings dialogs + thin code-behind),
+  `Styles/` (Colors/Controls/DataGrid), rewritten `MainWindow.xaml(.cs)`,
+  `App.xaml` (merged dictionaries). Deleted superseded `Scheduler/QueueRow.cs`.
+  New tests: `SchedulerViewModelTests.cs` (10), `SchedulerSettingsTests.cs` (6),
+  `SchedulerUiScaleTests.cs` (3), `SchedulerXamlTests.cs` (1).
+
+## Tests: 137 passing in blocking lane (117 carried + 20 new), 0 known-failing
+
+- 10 T-UI-VM + 6 T-SETTINGS + 3 T-UI-SCALE + 1 T-UI-XAML, green repeatedly.
+- MainWindow.xaml.cs reduced 320 → ~200 lines of pure composition/view glue
+  (no scheduler business logic: no state machines, no DB/file/HTTP calls).
+
+## UI scale measurements (headless VM load + ops; visuals virtualized, not realized)
+
+| Rows | Enqueue (DB) | Model load | Filter | Sort | Search | Managed Δ |
+|---|---|---|---|---|---|---|
+| 100 | 0.0 s | 0.00 s | 1 ms | 1 ms | 0 ms | ~0.0 MB |
+| 1,000 | 0.0 s | 0.00 s | 0 ms | 1 ms | 0 ms | 0.6 MB |
+| 10,000 | 0.5 s | 0.08 s | 1 ms | 13 ms | 4 ms | 3.4 MB (~0.35 KB/row) |
+
+No per-row timers/subscriptions/controls by construction (single refresh timer +
+single search debouncer per MainViewModel; rows are plain data + one event each).
+Burst coalescing verified: naive per-event rebuild measured 6.06 s for the same
+10k import; coalesced path 0.08 s. Real-app working set at idle launch (0 jobs):
+~115 MB; rendering cost under load not measured headless — see manual pass.
+
+## Manual smoke pass (2026-10-03, live app on dev box)
+
+- App launches, creates `%LOCALAPPDATA%\DRRipper\queue.db`, stays responsive: PASS.
+- Graceful window close preserves queue and exits cleanly: PASS (after fixing
+  illegal re-entrant `Close()` inside `Closing`, found by this pass).
+- Window handle present + process responsive: PASS.
+- NOT performed headless: pixel-level styling review, 10k-row scroll feel,
+  drag-resize across sizes, 100/125/150% display scaling. The layout uses a
+  virtualized recycling DataGrid (STA-verified in-repo), standard WPF layout
+  panels, and vector glyphs only — no custom render code that could scale badly.
+  Recorded honestly as remaining manual checklist for a GUI session (see below).
+
+## Scheduler benchmarks vs Ticket #005.1 (100 MB/file, 4 conns, 3 iters, all OK)
+
+| Active jobs | #006 median agg | #005.1 baseline | Δ |
+|---|---|---|---|
+| 1 | 199.7 MB/s | 196.3 | +1.7% |
+| 3 | 264.2 MB/s | 267.2 | −1.1% |
+| 8 | 291.7 MB/s | 293.2 | −0.5% |
+
+UI code present in-process; engine path has no Dispatcher dependency and no new
+allocations. No material effect (all within ±5%).
+
+## CI
+
+- Ticket #006 run: pending at push time; result recorded in the final report.
+- New UI test classes contain "Scheduler" or "Settings"/"Xaml"… verify:
+  `SchedulerViewModelTests`, `SchedulerSettingsTests`, `SchedulerUiScaleTests`
+  match `FullyQualifiedName~Scheduler`; `SchedulerXamlTests` likewise. No filter
+  change needed. No screenshot tests added (STA window-construction test only).

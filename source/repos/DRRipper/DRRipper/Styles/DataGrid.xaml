@@ -1,0 +1,62 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Queue grid: virtualization explicitly ON (Ticket #006 §22), thin progress, state text+glyph. -->
+    <Style x:Key="QueueDataGrid" TargetType="DataGrid">
+        <Setter Property="Background" Value="{StaticResource Surface}" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+        <Setter Property="BorderBrush" Value="{StaticResource Border}" />
+        <Setter Property="GridLinesVisibility" Value="Horizontal" />
+        <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource Border}" />
+        <Setter Property="HeadersVisibility" Value="Column" />
+        <Setter Property="AutoGenerateColumns" Value="False" />
+        <Setter Property="IsReadOnly" Value="True" />
+        <Setter Property="SelectionMode" Value="Extended" />
+        <Setter Property="SelectionUnit" Value="FullRow" />
+        <Setter Property="CanUserAddRows" Value="False" />
+        <Setter Property="CanUserDeleteRows" Value="False" />
+        <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
+        <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling" />
+        <Setter Property="VirtualizingPanel.ScrollUnit" Value="Pixel" />
+        <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto" />
+        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+        <Setter Property="RowBackground" Value="{StaticResource Surface}" />
+        <Setter Property="AlternatingRowBackground" Value="{StaticResource BackgroundSecondary}" />
+    </Style>
+
+    <Style x:Key="QueueColumnHeader" TargetType="DataGridColumnHeader">
+        <Setter Property="Background" Value="{StaticResource BackgroundSecondary}" />
+        <Setter Property="Foreground" Value="{StaticResource TextSecondary}" />
+        <Setter Property="BorderBrush" Value="{StaticResource Border}" />
+        <Setter Property="BorderThickness" Value="0,0,1,1" />
+        <Setter Property="Padding" Value="6,4" />
+        <Setter Property="HorizontalContentAlignment" Value="Left" />
+    </Style>
+
+    <!-- Thin professional progress indicator (§39): 10px bar + numeric text. -->
+    <DataTemplate x:Key="ProgressCellTemplate">
+        <Grid Margin="4,2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <ProgressBar Grid.Column="0" Height="10" Minimum="0" Maximum="100"
+                         Value="{Binding Progress, Mode=OneWay}"
+                         Background="{StaticResource Border}"
+                         Foreground="{StaticResource Accent}"
+                         BorderThickness="0" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Margin="6,0,0,0" Width="52" TextAlignment="Right"
+                       Text="{Binding ProgressText, Mode=OneWay}"
+                       Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" />
+        </Grid>
+    </DataTemplate>
+
+    <!-- Status cell: glyph + text (never color alone, §8/§32). -->
+    <DataTemplate x:Key="StatusCellTemplate">
+        <StackPanel Orientation="Horizontal" Margin="4,2" VerticalAlignment="Center">
+            <TextBlock Text="{Binding StatusGlyph, Mode=OneWay}" Width="16"
+                       Foreground="{StaticResource TextSecondary}" />
+            <TextBlock Text="{Binding StatusText, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+    </DataTemplate>
+</ResourceDictionary>
