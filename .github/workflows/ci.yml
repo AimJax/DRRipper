@@ -9,6 +9,13 @@ on:
 jobs:
   build-and-test:
     runs-on: windows-latest
+    # Forensics steps publish failed-test names as commit statuses and upload
+    # trx artifacts; both need write access. Test verdicts themselves are
+    # unaffected (gates fail the job on double failure).
+    permissions:
+      contents: read
+      statuses: write
+      actions: read
     steps:
       - name: Check out
         uses: actions/checkout@v4

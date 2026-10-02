@@ -408,6 +408,12 @@ reTx 0, admit ~0 ms, dbw ~10–16/s, CPU/WS/handles in kind with #005.
 
 ## CI
 
-- Ticket #005.1 run: pending at push time; result recorded in the final report.
+- Ticket #005.1 run (#12, commit 44b2347): **SUCCESS** — engine lane green,
+  scheduler lane (54 incl. 15 new) green, KnownFailure empty, Sensitive green.
+  First-attempt engine failure was absorbed by the failures-only retry (step
+  detail: engine test step red → 16 s retry green → gate skipped), confirming
+  the retry machinery works as designed and the product is green. Forensics
+  status posting fixed separately (workflow `statuses: write` permission).
+- Ticket #005.1 follow-up runs: recorded in the final report.
 - New classes are `SchedulerBudgetHardeningTests`/`SchedulerProgressTests`, matched
-  by the existing `FullyQualifiedName~Scheduler` CI filter — no workflow change needed.
+  by the existing `FullyQualifiedName~Scheduler` CI filter — no filter change needed.
