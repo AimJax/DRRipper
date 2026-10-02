@@ -483,7 +483,12 @@ allocations. No material effect (all within ±5%).
 
 ## CI
 
-- Ticket #006 run: pending at push time; result recorded in the final report.
+- Ticket #006 run (#14, commit 44f3b0f): **SUCCESS** — engine 63 first-attempt
+  green; scheduler lane first attempt had one flake
+  (`T_SCHED_10_Shutdown_Preserves_Recovery`, gate-timing under parallel load),
+  absorbed green by the failures-only retry (14 s). Forensics posted publicly:
+  `FLAKES ABSORBED on retry: FAILED: …T_SCHED_10…`. KnownFailure empty,
+  Sensitive green. No retries needed for the 20 new UI tests.
 - New UI test classes contain "Scheduler" or "Settings"/"Xaml"… verify:
   `SchedulerViewModelTests`, `SchedulerSettingsTests`, `SchedulerUiScaleTests`
   match `FullyQualifiedName~Scheduler`; `SchedulerXamlTests` likewise. No filter
