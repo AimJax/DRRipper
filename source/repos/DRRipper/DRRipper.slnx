@@ -1,5 +1,7 @@
 <Solution>
   <Project Path="DRRipper/DRRipper.csproj" />
+  <Project Path="DRRipper.BrowserProtocol/DRRipper.BrowserProtocol.csproj" />
+  <Project Path="DRRipper.NativeHost/DRRipper.NativeHost.csproj" />
   <Project Path="DRRipper.TestServer/DRRipper.TestServer.csproj" />
   <Project Path="DRRipper.Tests/DRRipper.Tests.csproj" />
   <Project Path="DRRipper.Benchmarks/DRRipper.Benchmarks.csproj" />

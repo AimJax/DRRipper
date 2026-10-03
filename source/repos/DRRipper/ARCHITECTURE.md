@@ -350,6 +350,54 @@ Presentation/lifecycle only — engine, scheduler, and store untouched.
   horizontally at compact widths (DataGrid itself never wrapped — virtualization
   intact); Add dialog Enter/Escape; Desktop Behavior section with restart notes.
 
+## 16. Post-Ticket #007 browser-integration deltas
+
+Browser handoff above the untouched scheduler trust model. Transfer,
+checkpointing, budgets, admission, and store durability are unchanged except
+additive deltas (job columns v1→v2, optional request-context plumbing).
+
+```
+Extension (MV3 JS) ──stdio framing──▶ NativeHost.exe ──pipe framing──▶ Bridge
+  context menu + interception (cancel ONLY after ack)   validate+forward
+  minimal permissions (no cookies/tabs/host)            launch --background
+                                                                              ▼
+MainWindow (bridge owner, tray/placement unchanged) ◀── DownloadScheduler
+  BrowserBridgeService (pipe server, idempotency, validation) ──▶ EnqueueBrowserAsync
+        │                                                              │ same queue path
+        ▼                                                              ▼
+  Settings Browser Integration panel                      ActiveJobRuntime ──▶ RequestContext
+  Details pane Source indicator                                (Referer/allowlisted headers)
+```
+
+- **Contract (§14):** versioned JSON (`version/type/requestId/url/
+  suggestedFileName/referrer/source/headers/cookies` → `accepted/jobId/
+  errorCode/message/duplicate/warnings`), shared by stdio + pipe hops in
+  `DRRipper.BrowserProtocol`. Both ends validate.
+- **Validation (§4):** http/https URLs only; closed header allowlist
+  (Referer/User-Agent/Accept/Accept-Language/Authorization) with transport
+  names dropped; cookie shape-checked but never applied
+  (`cookies-deferred-to-012`, #012 owns transfer); referrer host-only
+  persisted; 1 MB caps; filename sanitization (traversal/ADS/device/
+  trailing-dot/255-cap) with engine re-sanitize at path build.
+- **Store (§15):** schema v2 adds `SourceApplication/ReferrerHost/
+  BrowserRequestId` (+ index); headers/cookies deliberately transient.
+  v1 databases migrate; future versions still error explicitly.
+- **Engine (§18):** `BrowserRequestContext.ApplyTo` writes only the safe set
+  onto every probe/transfer request. Resume-after-restart falls back to
+  persisted-host Referer. Authorization/cookie VALUES never reach
+  logs/exceptions/UI/DB (`DescribeForDiagnostics` names-only).
+- **Bridge (§11/§13/§27/§28):** local-only pipe server, 10-min idempotency
+  (memory + persisted key), ping support, accept/reject counters, 30 s
+  per-client bound, orderly stop. No engine internals exposed.
+- **Single instance (§12/§29/§30/§44):** session mutex + in-process latch;
+  second GUI exits after bridge ping; native host launches
+  `--background --browser-bridge` (tray-only, no flash) with 45 s retry.
+  One desktop serves all handoffs.
+- **UI (§24/§46):** settings section (per-browser status/install/remove,
+  extension-ID field, refresh/test); Details pane `SourceDisplay`
+  (`Manual` vs `Chrome · host`); bridge lifecycle inside MainWindow
+  composition (created after scheduler, stopped before disposal).
+
 *End of ARCHITECTURE.md.*
 
 *End of ARCHITECTURE.md.*

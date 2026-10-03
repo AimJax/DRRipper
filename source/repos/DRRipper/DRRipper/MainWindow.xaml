@@ -244,6 +244,7 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
                         <TextBlock Text="URL:" Foreground="{StaticResource TextSecondary}" />
                         <TextBlock Grid.Column="1" Grid.ColumnSpan="3" Text="{Binding Url}" TextTrimming="CharacterEllipsis"
@@ -258,6 +259,10 @@
                         <TextBlock Grid.Row="3" Text="Failure:" Foreground="{StaticResource TextSecondary}" />
                         <TextBlock Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="3" Text="{Binding FailureReason}" TextWrapping="Wrap"
                                    Foreground="{StaticResource Error}" />
+                        <TextBlock Grid.Row="4" Text="Source:" Foreground="{StaticResource TextSecondary}" />
+                        <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="3" Text="{Binding SourceDisplay}" TextTrimming="CharacterEllipsis"
+                                   ToolTip="Origin: Manual or browser + referrer host (Ticket #007). No headers or cookies shown."
+                                   Foreground="{StaticResource TextPrimary}" />
                     </Grid>
                 </Expander>
             </Grid>

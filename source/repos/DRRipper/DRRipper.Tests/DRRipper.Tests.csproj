@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DRRipper\DRRipper.csproj" />
+    <ProjectReference Include="..\DRRipper.BrowserProtocol\DRRipper.BrowserProtocol.csproj" />
     <ProjectReference Include="..\DRRipper.TestServer\DRRipper.TestServer.csproj" />
     <ProjectReference Include="..\DRRipper.RecoveryDriver\DRRipper.RecoveryDriver.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>

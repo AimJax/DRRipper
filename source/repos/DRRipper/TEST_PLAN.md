@@ -237,6 +237,44 @@ Suite totals after Ticket #006.1: **157 passing in the blocking lane
 (137 carried + 20 new: 10 tray + 1 leak-cycle + 6 window + 3 context-menu),
 0 known-failing.**
 
+## 15. Ticket #007 implementation mapping (browser integration)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| T-BROWSER-HOST-01 valid enqueue | Framed request accepted, id preserved, headers filtered | PASS |
+| T-BROWSER-HOST-02 malformed JSON | Categorized `malformed-message` | PASS |
+| T-BROWSER-HOST-03 oversized | 1 MB cap enforced at framing | PASS |
+| T-BROWSER-HOST-04 truncated | `EndOfStreamException`, no hang | PASS |
+| T-BROWSER-HOST-05 version | `protocol-version-mismatch`, never forwarded | PASS |
+| T-BROWSER-HOST-06 schemes | file/javascript/data/ftp/custom rejected | PASS |
+| T-BROWSER-HOST-07 headers | Allowlist forwarded, transport dropped | PASS |
+| T-BROWSER-HOST-08 requestId | Echoed verbatim despite far-end rewrite | PASS |
+| T-BROWSER-HOST-09 unavailable | Explicit `desktop-unavailable` | PASS |
+| T-BROWSER-HOST-10 concurrent | 16 framed messages, zero cross-talk | PASS |
+| + filename/zero-length extras | Sanitization matrix + empty-frame rejection | PASS |
+| T-BRIDGE-01 enqueue | Scheduler job + metadata, traversal stripped | PASS |
+| T-BRIDGE-02 JobId persisted | Reopened store returns the same job | PASS |
+| T-BRIDGE-03 duplicate | Same id → one job, `duplicate:true` | PASS |
+| T-BRIDGE-04 distinct ids | Same URL → independent jobs | PASS |
+| T-BRIDGE-05 malformed | Categories, nothing enqueued | PASS |
+| T-BRIDGE-06 shutdown | Pipe server stops, clients refused | PASS |
+| T-BRIDGE-07 reuse | Pipe handoff + guard exclusivity + ping | PASS |
+| T-BRIDGE-08 large URL | 7 KiB valid URL accepted, redaction proven | PASS |
+| T-BROWSER-CTX-01 referrer | Referer host on the wire | PASS |
+| T-BROWSER-CTX-02 headers | Accept-Language + UA reach the test server | PASS |
+| T-BROWSER-CTX-03 hop-by-hop | Transport names never forwarded, range intact | PASS |
+| T-BROWSER-CTX-04 auth | Applied to transport, `[redacted]` in diagnostics | PASS |
+| T-BROWSER-CTX-05 cookies | Deferred warning, nothing secret persisted/described | PASS |
+| T-BROWSER-REG-01 manifest | Valid Chromium/Firefox JSON, no wildcards | PASS |
+| T-BROWSER-REG-02 idempotent | Double install, one key | PASS |
+| T-BROWSER-REG-03 uninstall | Scoped removal, neighbor keys intact | PASS |
+| T-BROWSER-REG-04 escaping | Spaced path round-trips as JSON | PASS |
+| T-BROWSER-REG-05 unsupported | Bad browser/wildcard/empty fail safe, nothing written | PASS |
+
+Suite totals after Ticket #007: **196 passing in the blocking lane
+(157 carried + 39 new: 10 host + 8 bridge + 5 context + 5 registration +
+11 filename/frame extras), 0 known-failing.**
+
 *End of TEST_PLAN.md.*
 
 *End of TEST_PLAN.md.*

@@ -30,6 +30,7 @@ namespace DRRipper.UI
         private int _connections;
         private DateTimeOffset _added;
         private string _targetPath = string.Empty;
+        private string _sourceDisplay = string.Empty;
 
         private long _lastBytes = -1;
         private DateTimeOffset _lastAt = DateTimeOffset.MinValue;
@@ -54,6 +55,8 @@ namespace DRRipper.UI
         public int Connections { get => _connections; private set => Set(ref _connections, value); }
         public DateTimeOffset Added { get => _added; private set => Set(ref _added, value); }
         public string TargetPath { get => _targetPath; private set => Set(ref _targetPath, value); }
+        /// <summary>Browser origin indicator (Ticket #007 §46): "Manual" or "Chrome · example.com". No secrets.</summary>
+        public string SourceDisplay { get => _sourceDisplay; private set => Set(ref _sourceDisplay, value); }
 
         public bool IsActive => State == JobState.Downloading || State == JobState.Pausing || State == JobState.Retrying;
         public bool IsTerminal => State == JobState.Completed || State == JobState.Failed || State == JobState.Cancelled;
@@ -72,6 +75,7 @@ namespace DRRipper.UI
             Connections = job.ConnectionsPerFile;
             Added = job.CreatedUtc;
             TargetPath = job.ResolvedFinalPath ?? job.TargetDirectory;
+            SourceDisplay = MapSource(job);
             FailureReason = job.State == JobState.Failed ? (job.FailureReason ?? "Failed") : string.Empty;
             TotalBytes = job.TotalBytes;
             CompletedBytes = job.CompletedBytes;
@@ -164,6 +168,20 @@ namespace DRRipper.UI
                 return new Uri(job.OriginalUrl).Host;
             }
             catch { return string.Empty; }
+        }
+
+        internal static string MapSource(DownloadJob job)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(job.SourceApplication))
+                    return "Manual";
+                var source = job.SourceApplication.Trim();
+                if (!string.IsNullOrWhiteSpace(job.ReferrerHost))
+                    return source + " · " + job.ReferrerHost.Trim();
+                return source;
+            }
+            catch { return "Manual"; }
         }
 
         private static string FallbackName(string url)

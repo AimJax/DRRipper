@@ -95,6 +95,25 @@ namespace DRRipper.Scheduler
         /// <summary>Normalized host key for per-host budgeting (scheme+host+port).</summary>
         public string? HostKey { get; set; }
 
+        /// <summary>
+        /// Browser origin label for browser-handed jobs (Ticket #007 §15/§46),
+        /// e.g. "Chrome", "Edge", "Firefox". Null for manually added jobs.
+        /// </summary>
+        public string? SourceApplication { get; set; }
+
+        /// <summary>
+        /// Referrer HOST only (Ticket #007 §15/§19). The full source-page URL is
+        /// validated at handoff but never persisted — the host is enough for the
+        /// details pane and for resume-time Referer synthesis.
+        /// </summary>
+        public string? ReferrerHost { get; set; }
+
+        /// <summary>
+        /// Browser handoff idempotency key (Ticket #007 §27). Null for manual jobs.
+        /// Requested headers/cookies are deliberately NOT persisted (§15/§19).
+        /// </summary>
+        public string? BrowserRequestId { get; set; }
+
         /// <summary>UTC time when this job was last started (for debugging/analytics).</summary>
         public DateTimeOffset? LastStartedUtc { get; set; }
 
@@ -153,6 +172,22 @@ namespace DRRipper.Scheduler
 
         public override string ToString() =>
             $"ImportResult: {Accepted} accepted, {Rejected} rejected, {Duplicates} duplicates, {Errors.Count} errors";
+    }
+
+    /// <summary>
+    /// Browser-handoff enqueue options (Ticket #007 §14/§32). The browser
+    /// supplies a filename suggestion only; DRRipper owns the target directory.
+    /// </summary>
+    public sealed class BrowserEnqueueOptions
+    {
+        public string Url { get; set; } = string.Empty;
+        public string TargetDirectory { get; set; } = string.Empty;
+        public string? SuggestedFileName { get; set; }
+        public string? Referrer { get; set; }
+        public string? SourceApplication { get; set; }
+        public string? BrowserRequestId { get; set; }
+        public int? ConnectionsPerFile { get; set; }
+        public BrowserRequestContext? RequestContext { get; set; }
     }
 
     /// <summary>

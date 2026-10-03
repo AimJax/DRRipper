@@ -188,4 +188,22 @@ orderly shutdown veil, and 20 new headless tests green. Engine, scheduler, and
 store behavior unchanged (one shutdown-correctness fix in window code only).
 No browser/media/clipboard-monitoring/adaptive work introduced.
 
+## Ticket #006.1 status (2026-10-03)
+
+Tray + close-safety delivered: ContextMenu DataContext fix (F-20), tray
+service + close state machine (X hides by default, scheduler untouched),
+window placement persistence, settings Desktop Behavior section, 20 new
+headless tests green. Presentation/lifecycle only; engine/scheduler/store
+untouched.
+
+## Ticket #007 status (browser integration)
+
+Phase 5 browser milestone delivered: MV3 extension (context menu +
+opt-in interception, cancel-only-after-ack), Native Messaging host,
+named-pipe desktop bridge, single-instance + background launch, header/
+referrer request context with redaction, cookie transfer deferred to #012
+(contract carries, explicit warning), per-browser registration + settings
+UX, and 39 new tests green. Engine transfer mechanics unchanged (additive
+request-context application only). See BROWSER_INTEGRATION.md.
+
 *End of ROADMAP.md.*

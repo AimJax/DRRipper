@@ -493,3 +493,75 @@ allocations. No material effect (all within ±5%).
   `SchedulerViewModelTests`, `SchedulerSettingsTests`, `SchedulerUiScaleTests`
   match `FullyQualifiedName~Scheduler`; `SchedulerXamlTests` likewise. No filter
   change needed. No screenshot tests added (STA window-construction test only).
+
+---
+
+# Ticket #007 appendix (browser integration, same hardware)
+
+Production browser handoff above the untouched transfer trust model
+(additive request-context application on probe/transfer requests;
+v1→v2 job columns; no scheduling/budget/recovery/UI-transport changes).
+
+## Build
+
+- `dotnet build DRRipper.slnx -c Release`: **0 errors**. New projects:
+  `DRRipper.BrowserProtocol` (contract/validation/framing/registration),
+  `DRRipper.NativeHost` (stdio host + pipe forward + background launch).
+  New desktop files: `Scheduler/BrowserBridgeService.cs`,
+  `Scheduler/BrowserRequestContext.cs`, `Scheduler/SingleInstanceGuard.cs`,
+  `UI/BrowserIntegrationViewModel.cs`; extended `DownloadJob`/`JobStore`
+  (v2), `DownloadScheduler` (`EnqueueBrowserAsync`), `ActiveJobRuntime`,
+  `ParallelDownloader`/`DownloadSession` (context passthrough),
+  `App.xaml.cs` (launch flags + single instance), `MainWindow` (bridge
+  lifecycle + background hide + Source row), Settings dialog (Browser
+  Integration section). TestServer gains opt-in request-header capture
+  (Referer/UA/Accept*/Authorization-presence) for handoff tests. New tests:
+  `BrowserHostTests.cs`, `BrowserBridgeTests.cs`, `BrowserContextTests.cs`,
+  `BrowserRegistrationTests.cs`. Extension: `browser-extension/` (MV3,
+  no build step, no Node).
+
+## Tests: 196 passing in blocking lane (157 carried + 39 new), 0 known-failing
+
+- 10 host + 8 bridge + 5 context + 5 registration + 11 filename/frame extras.
+- One pre-existing STA ordering flake in full-suite runs:
+  `T_UI_XAML_Virtualization_Enabled` / `T_UI_CONTEXT_03` share the
+  single-WPF-Application singleton when two XAML suites run in one process
+  (one fails, each passes alone and on CI failures-only retry). Predates
+  this ticket (same signature in #006.1); no test weakened.
+
+## Scheduler benchmarks vs Ticket #006 baseline (100 MB/file, 4 conns, 3 iters)
+
+| Active jobs | #007 median agg | #006 baseline | Δ |
+|---|---|---|---|
+| 1 | 190.7 MB/s | 199.7 | −4.5% |
+| 3 | 269.6 MB/s | 264.2 | +2.0% |
+| 8 | 296.5 MB/s | 291.7 | +1.6% |
+
+All within ±5% (1-job cell carries a cold first iter at 145 MB/s;
+medians otherwise at/above baseline). Reqs exact, reTx 0, admit 0 ms,
+CPU/WS/handles/dbw in kind. The additive context hook (null for manual
+jobs) costs nothing measurable.
+
+## Live handoff smoke (native host + desktop bridge; no browser on box)
+
+- `NativeHost --register/--status/--unregister --browser chrome`:
+  NotInstalled → Installed (valid manifest, installed path, constrained
+  origin) → NotInstalled. Reversible, HKCU-only, no admin.
+- Extension→desktop path simulated with framed stdio messages against the
+  release binaries: enqueue accepted with JobId and completed 10.0 MB
+  end-to-end through the normal scheduler; same requestId replay → same
+  JobId, `duplicate:true`, no second job; 5 distinct ids → 5 jobs with ONE
+  desktop process; closed-app handoff launches `DRRipper.exe --background`
+  and the bridge accepts (launch bound raised 20→45 s after a post-kill
+  WAL-recovery run consumed most of the original budget; the extension
+  keeps the browser download past its 30 s timeout — the safe direction,
+  documented as a rare-duplicate caveat).
+- Server `Content-Disposition` filename wins over the browser suggestion
+  (engine probe authority, by design); traversal suggestions stripped at
+  the bridge and re-sanitized at path build.
+- Handoff latency: warm pipe enqueue→accept is millisecond-scale
+  (in-test); end-to-end stdio round-trip dominated by host process start.
+
+## CI
+
+- Ticket #007 run: recorded post-push in the final report.

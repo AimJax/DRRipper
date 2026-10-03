@@ -205,6 +205,13 @@ namespace DRRipper
         /// <summary>Host key override for budget attribution. Defaults to URL origin.</summary>
         public string? NetworkHostKey { get; set; }
 
+        /// <summary>
+        /// Browser request context (Ticket #007 §18). When set, probe and
+        /// transfer requests carry the validated referrer/allowlisted headers.
+        /// Null for manually added jobs. Transient only — never persisted.
+        /// </summary>
+        public Scheduler.BrowserRequestContext? RequestContext { get; set; }
+
         /// <summary>Fixed segment size for the dynamic chunk queue (unchanged default).</summary>
         internal const long SegmentSize = 8 * 1024 * 1024;
 
@@ -558,6 +565,7 @@ namespace DRRipper
             {
                 // Try HEAD first
                 var headReq = new HttpRequestMessage(HttpMethod.Head, url);
+                try { RequestContext?.ApplyTo(headReq); } catch { }
                 headResp = await _client.SendAsync(headReq, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (headResp.IsSuccessStatusCode)
                 {
@@ -602,6 +610,7 @@ namespace DRRipper
                 {
                     var req = new HttpRequestMessage(HttpMethod.Get, url);
                     req.Headers.Range = new RangeHeaderValue(0, 0);
+                    try { RequestContext?.ApplyTo(req); } catch { }
                     using (var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
                     {
                         if ((int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500)
@@ -724,6 +733,7 @@ namespace DRRipper
                 Mode = (acceptRanges && connections > 1 && totalSize > 0) ? "segmented" : "prefix",
                 NetworkGate = NetworkGate,
                 NetworkHostKey = NetworkHostKey,
+                RequestContext = RequestContext,
             };
             lock (_sessionLock)
             {

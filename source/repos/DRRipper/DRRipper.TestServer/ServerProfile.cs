@@ -12,7 +12,8 @@ public sealed record RequestRecord(
     int StatusCode,
     long BytesWritten,
     string ConnectionId,
-    int RemotePort = 0);
+    int RemotePort = 0,
+    Dictionary<string, string>? RequestHeaders = null);
 
 /// <summary>
 /// Mutable behaviour profile. Tests mutate this in-process between runs

@@ -44,7 +44,7 @@ namespace DRRipper.Scheduler
         }
 
         /// <summary>Starts the download. Returns immediately; completion flows via _onTerminal.</summary>
-        public void Start(CancellationToken schedulerCt, string hostKey)
+        public void Start(CancellationToken schedulerCt, string hostKey, BrowserRequestContext? requestContext = null)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(ActiveJobRuntime));
             if (_runTask != null) throw new InvalidOperationException("Job already started.");
@@ -58,6 +58,7 @@ namespace DRRipper.Scheduler
                 CheckpointInterval = TimeSpan.FromSeconds(2),
                 NetworkGate = _budget,
                 NetworkHostKey = hostKey,
+                RequestContext = requestContext,
             };
             _downloader.ProgressChanged += OnProgressChanged;
 

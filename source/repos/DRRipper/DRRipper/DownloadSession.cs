@@ -271,6 +271,12 @@ namespace DRRipper
         public DRRipper.Scheduler.INetworkPermitGate? NetworkGate;
         /// <summary>Host key for budget attribution. Defaults to Url's normalized origin.</summary>
         public string? NetworkHostKey;
+        /// <summary>
+        /// Browser request context (Ticket #007 §18). When set, every transfer
+        /// request carries the validated referrer/allowlisted headers. Null for
+        /// manually added jobs. Transient only — never persisted.
+        /// </summary>
+        public DRRipper.Scheduler.BrowserRequestContext? RequestContext;
 
         public DownloadSession(ParallelDownloader owner, HttpClient client)
         {
@@ -1426,6 +1432,7 @@ namespace DRRipper
                         using var req = new HttpRequestMessage(HttpMethod.Get, Url);
                         req.Headers.Range = new RangeHeaderValue(reqStart, reqEnd);
                         req.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
+                        try { RequestContext?.ApplyTo(req); } catch { }
                         if (useIfRange)
                         {
                             useIfRange = false;
@@ -1615,6 +1622,7 @@ namespace DRRipper
                         using var req = new HttpRequestMessage(HttpMethod.Get, Url);
                         if (PrefixOffset > 0)
                             req.Headers.Range = new RangeHeaderValue(PrefixOffset, null);
+                        try { RequestContext?.ApplyTo(req); } catch { }
                         if (useIfRange)
                         {
                             useIfRange = false;

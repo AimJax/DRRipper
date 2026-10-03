@@ -27,7 +27,7 @@ namespace DRRipper.Scheduler
         public long WriteCount => Interlocked.Read(ref _writeCount);
 
         // Current schema version
-        private const int CurrentSchemaVersion = 1;
+        private const int CurrentSchemaVersion = 2;
 
         /// <summary>
         /// Opens or creates the job store database at the given path.
@@ -96,6 +96,15 @@ namespace DRRipper.Scheduler
                     "INSERT INTO SchemaVersion (Version, AppliedUtc) VALUES (1, @utc);",
                     ct,
                     new SqliteParameter("@utc", DateTimeOffset.UtcNow.ToString("o")));
+                version = 1;
+            }
+            if (version < 2)
+            {
+                await MigrateToV2Async(ct);
+                await ExecuteNonQueryAsync(
+                    "INSERT INTO SchemaVersion (Version, AppliedUtc) VALUES (2, @utc);",
+                    ct,
+                    new SqliteParameter("@utc", DateTimeOffset.UtcNow.ToString("o")));
             }
 
             if (version > CurrentSchemaVersion)
@@ -142,6 +151,21 @@ namespace DRRipper.Scheduler
             await ExecuteNonQueryAsync(@"
                 CREATE INDEX IF NOT EXISTS IX_Jobs_HostKey
                 ON Jobs (HostKey);", ct);
+        }
+
+        /// <summary>
+        /// Migration to schema version 2 (Ticket #007 §15): browser-origin
+        /// metadata. Only the origin label + referrer host + idempotency key are
+        /// persisted; requested headers/cookies are deliberately transient.
+        /// </summary>
+        private async Task MigrateToV2Async(CancellationToken ct)
+        {
+            await ExecuteNonQueryAsync("ALTER TABLE Jobs ADD COLUMN SourceApplication TEXT;", ct);
+            await ExecuteNonQueryAsync("ALTER TABLE Jobs ADD COLUMN ReferrerHost TEXT;", ct);
+            await ExecuteNonQueryAsync("ALTER TABLE Jobs ADD COLUMN BrowserRequestId TEXT;", ct);
+            await ExecuteNonQueryAsync(@"
+                CREATE INDEX IF NOT EXISTS IX_Jobs_BrowserRequestId
+                ON Jobs (BrowserRequestId);", ct);
         }
 
         /// <summary>
@@ -197,12 +221,12 @@ namespace DRRipper.Scheduler
                     JobId, OriginalUrl, TargetDirectory, RequestedFileName, ResolvedFileName, ResolvedFinalPath,
                     CreatedUtc, UpdatedUtc, QueuePosition, Priority, State, FailureReason,
                     AttemptCount, ConnectionsPerFile, TotalBytes, CompletedBytes, HostKey,
-                    LastStartedUtc, CompletedUtc
+                    LastStartedUtc, CompletedUtc, SourceApplication, ReferrerHost, BrowserRequestId
                 ) VALUES (
                     @JobId, @OriginalUrl, @TargetDirectory, @RequestedFileName, @ResolvedFileName, @ResolvedFinalPath,
                     @CreatedUtc, @UpdatedUtc, @QueuePosition, @Priority, @State, @FailureReason,
                     @AttemptCount, @ConnectionsPerFile, @TotalBytes, @CompletedBytes, @HostKey,
-                    @LastStartedUtc, @CompletedUtc
+                    @LastStartedUtc, @CompletedUtc, @SourceApplication, @ReferrerHost, @BrowserRequestId
                 );";
 
             var parameters = JobToParameters(job);
@@ -225,12 +249,12 @@ namespace DRRipper.Scheduler
                             JobId, OriginalUrl, TargetDirectory, RequestedFileName, ResolvedFileName, ResolvedFinalPath,
                             CreatedUtc, UpdatedUtc, QueuePosition, Priority, State, FailureReason,
                             AttemptCount, ConnectionsPerFile, TotalBytes, CompletedBytes, HostKey,
-                            LastStartedUtc, CompletedUtc
+                            LastStartedUtc, CompletedUtc, SourceApplication, ReferrerHost, BrowserRequestId
                         ) VALUES (
                             @JobId, @OriginalUrl, @TargetDirectory, @RequestedFileName, @ResolvedFileName, @ResolvedFinalPath,
                             @CreatedUtc, @UpdatedUtc, @QueuePosition, @Priority, @State, @FailureReason,
                             @AttemptCount, @ConnectionsPerFile, @TotalBytes, @CompletedBytes, @HostKey,
-                            @LastStartedUtc, @CompletedUtc
+                            @LastStartedUtc, @CompletedUtc, @SourceApplication, @ReferrerHost, @BrowserRequestId
                         );";
 
                     foreach (var job in jobs)
@@ -268,6 +292,32 @@ namespace DRRipper.Scheduler
                 using var cmd = _connection.CreateCommand();
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@JobId", jobId.ToString());
+                using var reader = await cmd.ExecuteReaderAsync(ct);
+                if (await reader.ReadAsync(ct))
+                    return ReadJob(reader);
+                return null;
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Finds a job by its browser handoff idempotency key (Ticket #007 §27).
+        /// Null/empty keys never match (manual jobs carry no key).
+        /// </summary>
+        public async Task<DownloadJob?> GetByBrowserRequestIdAsync(string? browserRequestId, CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(browserRequestId))
+                return null;
+            var sql = "SELECT * FROM Jobs WHERE BrowserRequestId = @BrowserRequestId ORDER BY CreatedUtc DESC LIMIT 1;";
+            await _writeLock.WaitAsync(ct);
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = sql;
+                cmd.Parameters.AddWithValue("@BrowserRequestId", browserRequestId);
                 using var reader = await cmd.ExecuteReaderAsync(ct);
                 if (await reader.ReadAsync(ct))
                     return ReadJob(reader);
@@ -390,6 +440,30 @@ namespace DRRipper.Scheduler
 
             var sql = $"UPDATE Jobs SET {string.Join(", ", sets)} WHERE JobId = @JobId;";
             await ExecuteNonQueryAsync(sql, ct, parameters.ToArray());
+        }
+
+        /// <summary>
+        /// Persists browser-origin metadata after a browser enqueue (Ticket #007 §15).
+        /// Only origin label + referrer host + idempotency key; headers/cookies
+        /// are never written here by design.
+        /// </summary>
+        public async Task UpdateBrowserMetadataAsync(DownloadJob job, CancellationToken ct = default)
+        {
+            if (job == null)
+                throw new ArgumentNullException(nameof(job));
+            await ExecuteNonQueryAsync(
+                @"UPDATE Jobs SET
+                    SourceApplication = @SourceApplication,
+                    ReferrerHost = @ReferrerHost,
+                    BrowserRequestId = @BrowserRequestId,
+                    UpdatedUtc = @UpdatedUtc
+                  WHERE JobId = @JobId;",
+                ct,
+                new SqliteParameter("@JobId", job.JobId.ToString()),
+                new SqliteParameter("@SourceApplication", job.SourceApplication ?? (object)DBNull.Value),
+                new SqliteParameter("@ReferrerHost", job.ReferrerHost ?? (object)DBNull.Value),
+                new SqliteParameter("@BrowserRequestId", job.BrowserRequestId ?? (object)DBNull.Value),
+                new SqliteParameter("@UpdatedUtc", DateTimeOffset.UtcNow.ToString("o")));
         }
 
         /// <summary>
@@ -584,6 +658,9 @@ namespace DRRipper.Scheduler
                 new SqliteParameter("@HostKey", job.HostKey ?? (object)DBNull.Value),
                 new SqliteParameter("@LastStartedUtc", job.LastStartedUtc?.ToString("o") ?? (object)DBNull.Value),
                 new SqliteParameter("@CompletedUtc", job.CompletedUtc?.ToString("o") ?? (object)DBNull.Value),
+                new SqliteParameter("@SourceApplication", job.SourceApplication ?? (object)DBNull.Value),
+                new SqliteParameter("@ReferrerHost", job.ReferrerHost ?? (object)DBNull.Value),
+                new SqliteParameter("@BrowserRequestId", job.BrowserRequestId ?? (object)DBNull.Value),
             };
         }
 
@@ -610,7 +687,23 @@ namespace DRRipper.Scheduler
                 HostKey = reader.IsDBNull(reader.GetOrdinal("HostKey")) ? null : reader.GetString(reader.GetOrdinal("HostKey")),
                 LastStartedUtc = reader.IsDBNull(reader.GetOrdinal("LastStartedUtc")) ? null : DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("LastStartedUtc"))),
                 CompletedUtc = reader.IsDBNull(reader.GetOrdinal("CompletedUtc")) ? null : DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("CompletedUtc"))),
+                SourceApplication = ReadOptionalString(reader, "SourceApplication"),
+                ReferrerHost = ReadOptionalString(reader, "ReferrerHost"),
+                BrowserRequestId = ReadOptionalString(reader, "BrowserRequestId"),
             };
+        }
+
+        private static string? ReadOptionalString(DbDataReader reader, string column)
+        {
+            try
+            {
+                var ordinal = reader.GetOrdinal(column);
+                return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+            }
+            catch
+            {
+                return null; // pre-migration databases without the column
+            }
         }
 
         public void Dispose()

@@ -146,5 +146,56 @@ namespace DRRipper.Views
             if (sender is System.Windows.Controls.ComboBox box && box.SelectedIndex >= 0 && box.SelectedIndex < CloseLabels.Length)
                 vm.CloseBehavior = (UI.CloseButtonBehavior)box.SelectedIndex;
         }
+
+        private BrowserIntegrationViewModel? BrowserVm => BrowserPanel.DataContext as BrowserIntegrationViewModel;
+
+        private void BrowserPanel_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (BrowserPanel.DataContext is BrowserIntegrationViewModel)
+                return;
+            try
+            {
+                var vm = new BrowserIntegrationViewModel();
+                BrowserPanel.DataContext = vm;
+                vm.Refresh();
+            }
+            catch { }
+        }
+
+        private void BrowserRefresh_Click(object sender, RoutedEventArgs e)
+        {
+            try { BrowserVm?.Refresh(); } catch { }
+        }
+
+        private void BrowserTest_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var vm = BrowserVm;
+                if (vm != null && sender is System.Windows.Controls.Button)
+                    vm.TestBridgeCommand.Execute(null);
+            }
+            catch { }
+        }
+
+        private void BrowserInstall_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sender is System.Windows.Controls.Button b)
+                    BrowserVm?.InstallCommand.Execute(b.Tag);
+            }
+            catch { }
+        }
+
+        private void BrowserUninstall_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sender is System.Windows.Controls.Button b)
+                    BrowserVm?.UninstallCommand.Execute(b.Tag);
+            }
+            catch { }
+        }
     }
 }

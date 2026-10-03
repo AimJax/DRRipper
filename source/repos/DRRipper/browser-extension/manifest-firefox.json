@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "DRRipper Download Handoff",
+  "version": "0.7.0",
+  "description": "Send ordinary downloads to the DRRipper desktop app.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "dripper@example.invalid",
+      "strict_min_version": "128.0"
+    }
+  },
+  "icons": {
+    "16": "icons/dripper-16.png",
+    "48": "icons/dripper-48.png",
+    "128": "icons/dripper-128.png"
+  },
+  "background": {
+    "scripts": ["native.js", "background.js"]
+  },
+  "options_ui": {
+    "page": "options.html"
+  },
+  "permissions": [
+    "contextMenus",
+    "downloads",
+    "nativeMessaging",
+    "storage"
+  ]
+}

@@ -13,12 +13,15 @@ using WpfDataGrid = System.Windows.Controls.DataGrid;
 namespace DRRipper
 {
     /// <summary>
-    /// Thin composition root (Ticket #006 §4/§45, #006.1 tray + close-safety):
-    /// builds settings → store → scheduler → view-model → tray → close controller,
-    /// syncs DataGrid selection, routes column sorting into the VM, and hosts dialogs.
+    /// Thin composition root (Ticket #006 §4/§45, #006.1 tray + close-safety,
+    /// #007 browser bridge): builds settings → store → scheduler → view-model →
+    /// tray → close controller → browser bridge, syncs DataGrid selection,
+    /// routes column sorting into the VM, and hosts dialogs.
     /// Close/minimize/exit policy lives in <see cref="CloseController"/> (headless
-    /// tested); this class only performs window/tray side effects. No queue business
-    /// logic lives here — all of it is in <see cref="MainViewModel"/>.
+    /// tested); bridge enqueue policy lives in <see cref="BrowserBridgeService"/>
+    /// (headless tested); this class only performs window/tray side effects.
+    /// No queue business logic lives here — all of it is in
+    /// <see cref="MainViewModel"/> / <see cref="DownloadScheduler"/>.
     /// </summary>
     public partial class MainWindow : Window
     {
@@ -29,6 +32,7 @@ namespace DRRipper
         private ITrayService? _tray;
         private TrayMenuRouter? _trayRouter;
         private CloseController? _closeController;
+        private BrowserBridgeService? _browserBridge;
         private AppSettings _settings = AppSettings.Defaults();
 
         public MainWindow()
@@ -82,8 +86,21 @@ namespace DRRipper
                 DataContext = _vm;
                 CreateTray();
                 CreateCloseController();
+                CreateBrowserBridge();
                 ApplyWindowPlacement();
                 await _vm.InitializeAsync();
+                if (App.LaunchOptions.Background)
+                {
+                    // Native-host background launch (§29): no window flash; the
+                    // bridge is already serving, jobs enqueue into the tray app.
+                    try
+                    {
+                        _tray?.Show();
+                        Hide();
+                        ShowInTaskbar = false;
+                    }
+                    catch { }
+                }
                 if (!string.IsNullOrEmpty(_vm.StartupError))
                     System.Windows.MessageBox.Show(_vm.StartupError, "DRRipper",
                         MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -93,6 +110,28 @@ namespace DRRipper
                 System.Windows.MessageBox.Show("DRRipper failed to start the download queue:" + Environment.NewLine + UI.Formatting.FormatError(ex.Message),
                     "DRRipper", MessageBoxButton.OK, MessageBoxImage.Error);
             }
+        }
+
+        // ---------- browser bridge composition (Ticket #007 §13) ----------
+
+        private void CreateBrowserBridge()
+        {
+            try { _browserBridge?.Dispose(); } catch { }
+            _browserBridge = null;
+            var scheduler = _scheduler;
+            if (scheduler == null)
+                return;
+            try
+            {
+                var bridge = new BrowserBridgeService(
+                    scheduler,
+                    () => string.IsNullOrWhiteSpace(_settings.DefaultDownloadDirectory)
+                        ? AppSettings.Defaults().DefaultDownloadDirectory
+                        : _settings.DefaultDownloadDirectory);
+                bridge.Start();
+                _browserBridge = bridge;
+            }
+            catch { }
         }
 
         // ---------- tray + close composition ----------
@@ -163,6 +202,14 @@ namespace DRRipper
             }
             try { _trayRouter?.Dispose(); } catch { }
             _trayRouter = null;
+            try
+            {
+                if (_browserBridge != null)
+                    await _browserBridge.StopAsync();
+            }
+            catch { }
+            try { _browserBridge?.Dispose(); } catch { }
+            _browserBridge = null;
             try { _scheduler?.Dispose(); } catch { }
             try { _store?.Dispose(); } catch { }
             try
@@ -201,6 +248,14 @@ namespace DRRipper
             try { if (_vm != null) await _vm.ShutdownAsync(); } catch { }
             try { _trayRouter?.Dispose(); } catch { }
             _trayRouter = null;
+            try
+            {
+                if (_browserBridge != null)
+                    await _browserBridge.StopAsync();
+            }
+            catch { }
+            try { _browserBridge?.Dispose(); } catch { }
+            _browserBridge = null;
             try { _scheduler?.Dispose(); } catch { }
             try { _store?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }

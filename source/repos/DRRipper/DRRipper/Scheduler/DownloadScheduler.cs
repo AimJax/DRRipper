@@ -33,6 +33,11 @@ namespace DRRipper.Scheduler
         private readonly ConcurrentDictionary<Guid, ActiveJobRuntime> _active = new();
         private readonly ConcurrentDictionary<Guid, DateTimeOffset> _lastPersist = new();
         private readonly ConcurrentDictionary<Guid, DateTimeOffset> _lastEvent = new();
+        /// <summary>
+        /// Transient browser request contexts by JobId (Ticket #007 §18/§19).
+        /// Never persisted; resume after restart falls back to ReferrerHost.
+        /// </summary>
+        private readonly ConcurrentDictionary<Guid, BrowserRequestContext> _browserContexts = new();
         private readonly SemaphoreSlim _pumpLock = new(1, 1);
         private CancellationTokenSource? _loopCts;
         private Task? _loopTask;
@@ -231,8 +236,7 @@ namespace DRRipper.Scheduler
             return job;
         }
 
-        /// <summary>
-        /// Bulk import of newline-separated URLs (§10). Single batch transaction.
+        /// <summary>Bulk import of newline-separated URLs (§10). Single batch transaction.
         /// One malformed line never aborts the batch.
         /// </summary>
         public async Task<ImportResult> ImportAsync(string newlineSeparatedUrls, string targetDirectory, int? connectionsPerFile = null, int priority = 0, CancellationToken ct = default)
@@ -289,6 +293,67 @@ namespace DRRipper.Scheduler
             await PumpAsync();
             return result;
         }
+
+        /// <summary>
+        /// Browser-handoff enqueue (Ticket #007 §31/§32): the SAME normal
+        /// persistent scheduler path as manual jobs. The browser supplies a
+        /// filename suggestion only — DRRipper owns the target directory.
+        /// Validated origin metadata is persisted (§15); request headers stay
+        /// transient in <see cref="_browserContexts"/> (never in the DB, §19).
+        /// </summary>
+        public async Task<DownloadJob> EnqueueBrowserAsync(BrowserEnqueueOptions options, CancellationToken ct = default)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, nameof(DownloadScheduler));
+            if (options == null)
+                throw new ArgumentNullException(nameof(options));
+            if (string.IsNullOrWhiteSpace(options.TargetDirectory))
+                throw new ArgumentException("Target directory is required.", nameof(options));
+            if (!BrowserBridge.BrowserValidation.TryNormalizeUrl(options.Url, out var normalized, out _))
+                throw new ArgumentException("Invalid browser URL.", nameof(options));
+
+            var suggested = BrowserBridge.BrowserValidation.SanitizeFileName(options.SuggestedFileName);
+            var job = await EnqueueAsync(normalized, options.TargetDirectory,
+                options.ConnectionsPerFile, priority: 0, requestedFileName: suggested, ct);
+
+            string? referrerHost = null;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(options.Referrer) &&
+                    Uri.TryCreate(options.Referrer, UriKind.Absolute, out var ru) &&
+                    (string.Equals(ru.Scheme, "http", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(ru.Scheme, "https", StringComparison.OrdinalIgnoreCase)))
+                    referrerHost = ru.Host;
+            }
+            catch { }
+
+            string source = "Browser";
+            try
+            {
+                if (BrowserBridge.BrowserValidation.TryNormalizeSource(options.SourceApplication, out var s))
+                    source = s;
+            }
+            catch { }
+
+            var patched = job.With(j =>
+            {
+                j.SourceApplication = source;
+                j.ReferrerHost = referrerHost;
+                j.BrowserRequestId = options.BrowserRequestId;
+            });
+            try { await _store.UpdateBrowserMetadataAsync(patched, ct); } catch { }
+            try { JobUpdated?.Invoke(this, patched); } catch { }
+
+            if (options.RequestContext != null)
+                _browserContexts[job.JobId] = options.RequestContext;
+            return patched;
+        }
+
+        internal bool TryGetBrowserContext(Guid jobId, out BrowserRequestContext? context)
+            => _browserContexts.TryGetValue(jobId, out context);
+
+        /// <summary>Finds a job by browser handoff idempotency key (Ticket #007 §27).</summary>
+        public Task<DownloadJob?> GetJobByBrowserRequestIdAsync(string? browserRequestId, CancellationToken ct = default)
+            => _store.GetByBrowserRequestIdAsync(browserRequestId, ct);
 
         // ---------- per-job controls ----------
 
@@ -545,7 +610,22 @@ namespace DRRipper.Scheduler
             _power.Acquire();
             _lastPersist[job.JobId] = DateTimeOffset.MinValue;
             _lastEvent[job.JobId] = DateTimeOffset.MinValue;
-            rt.Start(_loopCts?.Token ?? CancellationToken.None, hostKey);
+            BrowserRequestContext? browserContext = null;
+            try
+            {
+                if (!_browserContexts.TryGetValue(job.JobId, out browserContext) ||
+                    browserContext == null)
+                {
+                    // Resume-after-restart fallback: persisted referrer host only (§15).
+                    if (!string.IsNullOrWhiteSpace(job.ReferrerHost))
+                        browserContext = new BrowserRequestContext
+                        {
+                            Referrer = "https://" + job.ReferrerHost + "/",
+                        };
+                }
+            }
+            catch { browserContext = null; }
+            rt.Start(_loopCts?.Token ?? CancellationToken.None, hostKey, browserContext);
             _ = WatchJobAsync(job.JobId, rt);
         }
 

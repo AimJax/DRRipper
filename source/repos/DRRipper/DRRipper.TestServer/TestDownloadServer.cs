@@ -297,8 +297,32 @@ public sealed class TestDownloadServer : IAsyncDisposable
         }
         finally
         {
+            Dictionary<string, string>? captured = null;
+            try
+            {
+                // Ticket #007: capture browser-context headers for handoff tests.
+                // Presence-flag for Authorization (never the value, §19).
+                captured = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in new[] { "Referer", "User-Agent", "Accept", "Accept-Language" })
+                {
+                    try
+                    {
+                        var v = ctx.Request.Headers[name].FirstOrDefault();
+                        if (!string.IsNullOrEmpty(v))
+                            captured[name] = v;
+                    }
+                    catch { }
+                }
+                try
+                {
+                    if (!string.IsNullOrEmpty(ctx.Request.Headers.Authorization.FirstOrDefault()))
+                        captured["Authorization"] = "(present)";
+                }
+                catch { }
+            }
+            catch { captured = null; }
             log(new RequestRecord(DateTimeOffset.UtcNow, ctx.Request.Method, ctx.Request.Path.ToString(),
-                rangeHeader, status, bytesWritten, connectionId, ctx.Connection.RemotePort));
+                rangeHeader, status, bytesWritten, connectionId, ctx.Connection.RemotePort, captured));
         }
     }
 

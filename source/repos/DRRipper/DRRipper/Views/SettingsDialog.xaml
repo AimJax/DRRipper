@@ -106,6 +106,51 @@
 
             <TextBlock Margin="0,12,0,0" Foreground="{StaticResource Warning}" FontSize="11"
                        Text="Connection budget changes take effect after restarting DRRipper. Active-download limit, connections, folder, and refresh apply immediately." TextWrapping="Wrap" />
+
+            <TextBlock Text="Browser integration" Foreground="{StaticResource TextPrimary}" FontWeight="Bold" Margin="0,12,0,8" />
+            <!-- Browser panel gets its own VM in code-behind (Ticket #007 §24). -->
+            <StackPanel x:Name="BrowserPanel" Loaded="BrowserPanel_Loaded">
+                <TextBlock Foreground="{StaticResource TextSecondary}" FontSize="11" TextWrapping="Wrap"
+                           Text="Send ordinary downloads from Chrome/Edge/Firefox to DRRipper. Install registers the native host (per-user, reversible); nothing changes until you press Install." />
+                <Grid Margin="0,6,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="Chrome:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4" />
+                    <TextBlock Grid.Column="1" Text="{Binding ChromeStatus}" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center" Margin="0,4" TextTrimming="CharacterEllipsis" />
+                    <Button Grid.Column="2" Content="Install" Margin="4,2" Style="{StaticResource AppButton}" Click="BrowserInstall_Click" Tag="Chrome" />
+                    <Button Grid.Column="3" Content="Remove" Margin="0,2" Style="{StaticResource AppButton}" Click="BrowserUninstall_Click" Tag="Chrome" />
+                    <TextBlock Grid.Row="1" Text="Edge:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4" />
+                    <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding EdgeStatus}" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center" Margin="0,4" TextTrimming="CharacterEllipsis" />
+                    <Button Grid.Row="1" Grid.Column="2" Content="Install" Margin="4,2" Style="{StaticResource AppButton}" Click="BrowserInstall_Click" Tag="Edge" />
+                    <Button Grid.Row="1" Grid.Column="3" Content="Remove" Margin="0,2" Style="{StaticResource AppButton}" Click="BrowserUninstall_Click" Tag="Edge" />
+                    <TextBlock Grid.Row="2" Text="Firefox:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4" />
+                    <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding FirefoxStatus}" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center" Margin="0,4" TextTrimming="CharacterEllipsis" />
+                    <Button Grid.Row="2" Grid.Column="2" Content="Install" Margin="4,2" Style="{StaticResource AppButton}" Click="BrowserInstall_Click" Tag="Firefox" />
+                    <Button Grid.Row="2" Grid.Column="3" Content="Remove" Margin="0,2" Style="{StaticResource AppButton}" Click="BrowserUninstall_Click" Tag="Firefox" />
+                    <TextBlock Grid.Row="3" Text="Extension ID:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4"
+                               ToolTip="From the browser's extension page after loading the unpacked extension (see browser-extension/README.md)." />
+                    <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="3" Margin="0,4"
+                             Text="{Binding ExtensionId, UpdateSourceTrigger=PropertyChanged}"
+                             ToolTip="Paste the extension ID shown on chrome://extensions (Developer mode) after loading the unpacked extension." />
+                    <StackPanel Grid.Row="4" Grid.ColumnSpan="4" Orientation="Horizontal" Margin="0,4,0,0">
+                        <Button Content="Refresh status" Style="{StaticResource AppButton}" Click="BrowserRefresh_Click" />
+                        <Button Content="Test connection" Margin="6,0,0,0" Style="{StaticResource AppButton}" Click="BrowserTest_Click" />
+                        <TextBlock Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource TextSecondary}" FontSize="11"
+                                   Text="{Binding BridgeStatus}" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </Grid>
+                <TextBlock Margin="0,6,0,0" Foreground="{StaticResource TextSecondary}" FontSize="11" TextWrapping="Wrap"
+                           Text="{Binding Diagnostics}" />
+            </StackPanel>
         </StackPanel>
         </ScrollViewer>
 

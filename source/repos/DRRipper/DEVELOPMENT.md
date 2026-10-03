@@ -152,3 +152,26 @@ dotnet run --project source/repos/DRRipper/DRRipper.Benchmarks -c Release -- --s
 - `SettingsService`: versioned atomic JSON, safe fallbacks, temp-path injection.
 - Shell/clipboard/dialogs behind interfaces; safe `Process.Start` shell-execute
   only (file must exist; folder selects via explorer; never URL-built commands).
+
+## 12. Browser bridge model (Ticket #007)
+
+- Contract: versioned JSON (`BrowserBridgeProtocol`, shared by stdio + pipe
+  hops); both ends validate. Pipe: `DRRipper.NativeBridge` (tests inject
+  unique names), 4-byte LE framing, 1 MB cap, 30 s per-client bound.
+- Desktop: `BrowserBridgeService` (UI-free) validates → idempotency check
+  (10-min window + persisted `BrowserRequestId`) →
+  `DownloadScheduler.EnqueueBrowserAsync` (normal queue path; browser owns
+  the filename suggestion only). Headers/cookies never persisted.
+- Engine context: `BrowserRequestContext.ApplyTo` writes Referer/User-Agent/
+  Accept/Accept-Language/Authorization onto every probe/transfer request;
+  everything else ignored. Resume-after-restart uses the persisted
+  referrer host. Secrets never reach logs/UI/DB.
+- Store schema v2: `SourceApplication/ReferrerHost/BrowserRequestId`
+  (+ index); v1 migrates; future versions still error explicitly.
+- Single instance: session mutex + in-process latch; second GUI pings the
+  bridge and exits. Native host launches `DRRipper.exe --background
+  --browser-bridge` (tray-only) with a 45 s pipe retry.
+- Settings: Browser Integration section (per-browser status/install/remove,
+  extension-ID field, test connection). Queue Details shows `SourceDisplay`.
+- Handoff smoke: stdio loopback via `DRRipper.NativeHost.exe` + pipe client
+  against a live bridge (see BASELINE.md Ticket #007 appendix).

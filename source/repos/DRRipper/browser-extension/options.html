@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>DRRipper options</title>
+  <style>
+    body { font-family: Segoe UI, system-ui, sans-serif; margin: 16px; color: #222; max-width: 520px; }
+    label { display: block; margin: 10px 0; }
+    input[type="number"] { width: 140px; }
+    .hint { color: #666; font-size: 12px; }
+    #status { color: #0a6a0a; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <h2>DRRipper Download Handoff</h2>
+  <label><input type="checkbox" id="showMenu"> Show “Download with DRRipper” in context menus</label>
+  <label><input type="checkbox" id="intercept"> Intercept browser downloads automatically</label>
+  <label>Minimum file size for interception (bytes, 0 = all):
+    <input type="number" id="minBytes" min="0" step="1024" value="0">
+  </label>
+  <p class="hint">Interception only cancels the browser's own download after DRRipper
+    positively accepts the handoff. If DRRipper is unavailable, downloads proceed normally.</p>
+  <button id="save">Save</button>
+  <p id="status"></p>
+  <script src="options.js"></script>
+</body>
+</html>
