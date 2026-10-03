@@ -565,3 +565,36 @@ jobs) costs nothing measurable.
 ## CI
 
 - Ticket #007 run: recorded post-push in the final report.
+
+---
+
+# Ticket #007.1 appendix (packaging + feedback hardening, same hardware)
+
+No architecture changes (extension tree + manifests + tests + docs only).
+
+## Fix
+
+- Committed `icons/dripper-{16,48,128}.png` rendered from `dripper.svg`
+  (blue rounded square + white arrow, transparent corners); README no
+  longer asks users to rasterize — load-ready after manifest copy.
+- Added `notifications` to both manifests (solely for handoff
+  success/failure feedback; `notify()` stays try/catch best-effort and
+  never gates the cancel-only-after-ack path).
+
+## Tests: 14 new package/JS tests, all blocking and green
+
+- T-EXT-PKG-01..09 + T-EXT-JS-01..04 (`ExtensionPackageTests`).
+
+## Live validation
+
+- Microsoft Edge (Chromium) headed load of the committed tree: the
+  `background.js` service worker starts under its own
+  `chrome-extension://` origin with zero manifest asset errors (proves
+  manifest, worker, `native.js` import, and icons resolve). No click or
+  interception pass performed (no page harness on box); Firefox load not
+  attempted (no Firefox on box) — package tests + #007 host/bridge smoke
+  stand in, stated honestly.
+
+## CI
+
+- Ticket #007.1 run: recorded post-push in the final report.

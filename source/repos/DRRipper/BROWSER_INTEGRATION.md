@@ -124,8 +124,9 @@ again at path build (defense in depth) — nothing escapes the target dir.
   INSTALLED host path (never a dev path); HKCU keys only (no admin).
 - Chromium manifests constrain `allowed_origins` to the packaged extension
   origin (no wildcards); Firefox uses `allowed_extensions`.
-- Extension loading: see `browser-extension/README.md` (unpacked layout,
-  PNG icons from the committed SVG, temporary Firefox IDs).
+- Extension loading: see `browser-extension/README.md` (unpacked layout is
+  load-ready as committed: 16/48/128 PNG icons rendered from the SVG,
+  temporary Firefox IDs).
 
 ## 10. Extension behavior (§7/§8/§25)
 
@@ -135,7 +136,9 @@ again at path build (defense in depth) — nothing escapes the target dir.
   http/https jobs above the size floor are offered; the browser copy is
   cancelled + erased ONLY on positive ack.
 - Options: show-menu toggle, interception toggle, minimum bytes. Permissions
-  are minimal (`contextMenus`, `downloads`, `nativeMessaging`, `storage`;
+  are minimal (`contextMenus`, `downloads`, `nativeMessaging`, `storage`,
+  `notifications` — the last solely for user-visible handoff success/failure
+  feedback, best-effort only and never gating download behavior;
   no `cookies`, no `tabs`, no host permissions — no page-content access).
 
 ## 11. Manual validation procedure (§40–42)
@@ -147,6 +150,13 @@ completes with known hash → tray-hide and repeat → full exit and repeat
 with a clear error. Interception matrix: small/large file, 404, redirect,
 Content-Disposition filename, signed URL, missing host. Firefox: same
 context-menu + host smoke; if not robust, mark deferred (see §13).
+
+Validated 2026-10-04 (Ticket #007.1): the committed tree loads unpacked in
+Microsoft Edge with zero manifest asset errors — the `background.js`
+service worker starts (proves manifest parses, worker + `native.js`
+resolve, icons load). No click/interception pass was performed (no test
+page harness); covered instead by the package-integrity suite
+(`ExtensionPackageTests`, 14 tests) plus the #007 host/bridge live smoke.
 
 ## 12. Diagnostics (§47)
 

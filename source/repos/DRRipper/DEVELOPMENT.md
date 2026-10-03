@@ -175,3 +175,6 @@ dotnet run --project source/repos/DRRipper/DRRipper.Benchmarks -c Release -- --s
   extension-ID field, test connection). Queue Details shows `SourceDisplay`.
 - Handoff smoke: stdio loopback via `DRRipper.NativeHost.exe` + pipe client
   against a live bridge (see BASELINE.md Ticket #007 appendix).
+- Extension packaging (Ticket #007.1): `browser-extension/` is load-ready as
+  committed (PNGs + notifications permission); `ExtensionPackageTests`
+  validates manifests, assets, permissions, and JS safety properties.

@@ -17,6 +17,7 @@
     "contextMenus",
     "downloads",
     "nativeMessaging",
-    "storage"
+    "storage",
+    "notifications"
   ]
 }

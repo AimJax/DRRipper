@@ -275,6 +275,26 @@ Suite totals after Ticket #007: **196 passing in the blocking lane
 (157 carried + 39 new: 10 host + 8 bridge + 5 context + 5 registration +
 11 filename/frame extras), 0 known-failing.**
 
+## 16. Ticket #007.1 implementation mapping (packaging + feedback)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| T-EXT-PKG-01/02 manifests parse | Chromium MV3 + Firefox MV3/gecko-id JSON shape | PASS |
+| T-EXT-PKG-03 referenced files | background/options/icons exist for both manifests | PASS |
+| T-EXT-PKG-04/05 PNG validity/size | Signature + IHDR + IEND; exactly 16/48/128 | PASS |
+| T-EXT-PKG-06 no dangling refs | Manifest text sweep, all resolve on disk | PASS |
+| T-EXT-PKG-07/08 notifications | Present in both manifests (+ nativeMessaging/downloads) | PASS |
+| T-EXT-PKG-09 permission set | Exactly the justified five, no additions | PASS |
+| T-EXT-JS-01 cancel-after-ack | `downloads.cancel` textually under `if (result.accepted)` | PASS |
+| T-EXT-JS-02 notify best-effort | `notify()` + `notifications.create` inside try/catch | PASS |
+| T-EXT-JS-03 no raw URLs | No notify call references url/linkUrl/srcUrl/finalUrl | PASS |
+| T-EXT-JS-04 no cookie harvesting | No `chrome.cookies`/`document.cookie`; `cookies: null` | PASS |
+
+Suite totals after Ticket #007.1: **210 passing in the blocking lane
+(196 carried + 14 new package/JS tests), 0 known-failing.**
+
+*End of TEST_PLAN.md.*
+
 *End of TEST_PLAN.md.*
 
 *End of TEST_PLAN.md.*

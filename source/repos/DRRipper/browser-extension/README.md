@@ -11,6 +11,8 @@ Shared codebase; only the manifest differs per browser family.
 - `native.js` — native-messaging client, eligibility + error mapping
 - `options.html` / `options.js` — 3 settings (menu, interception, min size)
 - `icons/dripper.svg` — source artwork
+- `icons/dripper-16.png`, `dripper-48.png`, `dripper-128.png` — committed
+  rasterized icons (rendered from the SVG at exactly 16/48/128 px)
 
 ## Load unpacked (Chromium)
 
@@ -19,12 +21,9 @@ Shared codebase; only the manifest differs per browser family.
    - Chrome/Edge: copy `manifest-chromium.json` → `manifest.json`
    - Firefox: copy `manifest-firefox.json` → `manifest.json`
    - Do NOT commit `manifest.json` (git-ignored): it is a local copy.
-3. Generate PNG icons from `icons/dripper.svg` at 16/48/128 px and save as
-   `icons/dripper-16.png`, `icons/dripper-48.png`, `icons/dripper-128.png`
-   (any rasterizer; the manifests reference PNG for store compatibility).
-4. Chrome: `chrome://extensions` → Developer mode → Load unpacked → this folder.
+3. Chrome: `chrome://extensions` → Developer mode → Load unpacked → this folder.
    Note the 32-character extension ID shown on the card.
-5. Edge: `edge://extensions` → same steps.
+4. Edge: `edge://extensions` → same steps.
 
 ## Load temporary (Firefox)
 
@@ -60,5 +59,7 @@ DRRipper.NativeHost.exe --unregister --browser chrome
 ## Permissions rationale (§6)
 
 `contextMenus` (menu item), `downloads` (observe/cancel-after-ack),
-`nativeMessaging` (talk to the host), `storage` (3 settings). No `cookies`,
+`nativeMessaging` (talk to the host), `storage` (3 settings),
+`notifications` (user-visible handoff success/failure feedback —
+best-effort only, never gates download behavior). No `cookies`,
 no `tabs`, no host permissions — the extension never reads page content.
