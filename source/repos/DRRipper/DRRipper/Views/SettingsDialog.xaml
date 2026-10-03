@@ -65,12 +65,14 @@
                 </Grid.RowDefinitions>
                 <TextBlock Text="Global budget:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4" />
                 <ComboBox Grid.Column="1" Margin="0,4" Width="80" HorizontalAlignment="Left"
+                          x:Name="GlobalBox"
                           SelectionChanged="GlobalBox_SelectionChanged" Loaded="GlobalBox_Loaded">
                     <ComboBoxItem Content="8" /><ComboBoxItem Content="16" />
                     <ComboBoxItem Content="32" /><ComboBoxItem Content="64" />
                 </ComboBox>
                 <TextBlock Grid.Row="1" Text="Per-host budget:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4" />
                 <ComboBox Grid.Row="1" Grid.Column="1" Margin="0,4" Width="80" HorizontalAlignment="Left"
+                          x:Name="HostBox"
                           SelectionChanged="HostBox_SelectionChanged" Loaded="HostBox_Loaded">
                     <ComboBoxItem Content="2" /><ComboBoxItem Content="4" />
                     <ComboBoxItem Content="8" /><ComboBoxItem Content="16" />
@@ -106,6 +108,42 @@
 
             <TextBlock Margin="0,12,0,0" Foreground="{StaticResource Warning}" FontSize="11"
                        Text="Connection budget changes take effect after restarting DRRipper. Active-download limit, connections, folder, and refresh apply immediately." TextWrapping="Wrap" />
+
+            <TextBlock Text="Network / Performance" Foreground="{StaticResource TextPrimary}" FontWeight="Bold" Margin="0,12,0,8" />
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="220" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="Transfer mode:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4"
+                           ToolTip="Balanced: fair, predictable. Maximum throughput: aggressive saturation for large downloads." />
+                <ComboBox Grid.Column="1" Margin="0,4" Width="170" HorizontalAlignment="Left"
+                          SelectionChanged="TransferBox_SelectionChanged" Loaded="TransferBox_Loaded"
+                          ToolTip="Maximum throughput may consume nearly all available bandwidth.">
+                    <ComboBoxItem Content="Balanced" />
+                    <ComboBoxItem Content="Maximum throughput" />
+                </ComboBox>
+                <TextBlock Grid.Row="1" Text="Max connections per file:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4" />
+                <ComboBox Grid.Row="1" Grid.Column="1" Margin="0,4" Width="80" HorizontalAlignment="Left"
+                          x:Name="MaxConnsBox"
+                          SelectionChanged="MaxConnsBox_SelectionChanged" Loaded="MaxConnsBox_Loaded">
+                    <ComboBoxItem Content="8" /><ComboBoxItem Content="16" />
+                    <ComboBoxItem Content="24" /><ComboBoxItem Content="32" />
+                </ComboBox>
+                <TextBlock Grid.Row="2" Text="Global connection ceiling:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4" />
+                <ComboBox Grid.Row="2" Grid.Column="1" Margin="0,4" Width="80" HorizontalAlignment="Left"
+                          x:Name="CeilingBox"
+                          SelectionChanged="CeilingBox_SelectionChanged" Loaded="CeilingBox_Loaded">
+                    <ComboBoxItem Content="16" /><ComboBoxItem Content="32" />
+                    <ComboBoxItem Content="48" />
+                </ComboBox>
+            </Grid>
+            <TextBlock Margin="0,6,0,0" Foreground="{StaticResource Warning}" FontSize="11"
+                       Text="Maximum throughput aggressively saturates the connection for large downloads and may leave little bandwidth for other apps. Mode and per-file ceiling apply to newly started jobs; budget ceilings need a restart." TextWrapping="Wrap" />
 
             <TextBlock Text="Browser integration" Foreground="{StaticResource TextPrimary}" FontWeight="Bold" Margin="0,12,0,8" />
             <!-- Browser panel gets its own VM in code-behind (Ticket #007 §24). -->

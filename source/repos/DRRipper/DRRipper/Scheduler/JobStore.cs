@@ -443,6 +443,43 @@ namespace DRRipper.Scheduler
         }
 
         /// <summary>
+        /// Atomically marks a job Completed only if no control-path terminal
+        /// state intervened (Ticket #008: Cancel/Pause during finalization owns
+        /// its state — the success path must never stomp it). Returns true
+        /// when this call performed the transition.
+        /// </summary>
+        public async Task<bool> TryMarkCompletedAsync(
+            Guid jobId, long completedBytes, string? resolvedFinalPath, CancellationToken ct = default)
+        {
+            await _writeLock.WaitAsync(ct);
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = @"
+                    UPDATE Jobs SET
+                        State = 5,
+                        CompletedBytes = MAX(CompletedBytes, @CompletedBytes),
+                        ResolvedFinalPath = COALESCE(@ResolvedFinalPath, ResolvedFinalPath),
+                        CompletedUtc = @CompletedUtc,
+                        UpdatedUtc = @UpdatedUtc
+                    WHERE JobId = @JobId AND State NOT IN (3, 7);";
+                cmd.Parameters.AddWithValue("@JobId", jobId.ToString());
+                cmd.Parameters.AddWithValue("@CompletedBytes", completedBytes);
+                cmd.Parameters.AddWithValue("@ResolvedFinalPath",
+                    (object?)resolvedFinalPath ?? DBNull.Value);
+                var utc = DateTimeOffset.UtcNow.ToString("o");
+                cmd.Parameters.AddWithValue("@CompletedUtc", utc);
+                cmd.Parameters.AddWithValue("@UpdatedUtc", utc);
+                Interlocked.Increment(ref _writeCount);
+                return await cmd.ExecuteNonQueryAsync(ct) == 1;
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        /// <summary>
         /// Persists browser-origin metadata after a browser enqueue (Ticket #007 §15).
         /// Only origin label + referrer host + idempotency key; headers/cookies
         /// are never written here by design.

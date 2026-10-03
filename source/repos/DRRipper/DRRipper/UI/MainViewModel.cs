@@ -487,6 +487,10 @@ namespace DRRipper.UI
             var prev = Settings;
             Settings = next;
             try { _scheduler.Settings.ActiveDownloadLimit = next.ActiveDownloadLimit; } catch { }
+            // Mode + per-file ceiling apply to newly started jobs live; the
+            // connection-budget allocator itself is restart-scoped (§20).
+            try { _scheduler.Settings.TransferMode = next.TransferMode; } catch { }
+            try { _scheduler.Settings.MaxConnectionsPerFile = next.MaxConnectionsPerFile; } catch { }
             ApplySettings(next, next.UiRefreshMs);
             _ = prev;
         }

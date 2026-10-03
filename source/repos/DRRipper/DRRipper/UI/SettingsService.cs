@@ -42,6 +42,10 @@ namespace DRRipper.UI
         public bool WindowMaximized { get; set; }
         public CloseButtonBehavior CloseBehavior { get; set; } = CloseButtonBehavior.MinimizeToTray;
         public bool MinimizeToTray { get; set; } = true;
+        /// <summary>Transfer aggressiveness (Ticket #008 §5/§41). Default Balanced.</summary>
+        public Scheduler.TransferMode TransferMode { get; set; } = Scheduler.TransferMode.Balanced;
+        /// <summary>Per-file worker ceiling, adaptive in Maximum mode (Ticket #008 §22/§23).</summary>
+        public int MaxConnectionsPerFile { get; set; } = 8;
 
         public static AppSettings Defaults(string? defaultDirectory = null)
         {
@@ -63,6 +67,9 @@ namespace DRRipper.UI
             ConnectionsPerFileDefault = Math.Clamp(ConnectionsPerFileDefault, 1, 16);
             GlobalConnectionBudget = Math.Clamp(GlobalConnectionBudget, 1, 128);
             PerHostConnectionBudget = Math.Clamp(PerHostConnectionBudget, 1, GlobalConnectionBudget);
+            MaxConnectionsPerFile = Math.Clamp(MaxConnectionsPerFile, 1, 64);
+            if (!Enum.IsDefined(typeof(Scheduler.TransferMode), TransferMode))
+                TransferMode = Scheduler.TransferMode.Balanced;
             UiRefreshMs = Math.Clamp(UiRefreshMs, 250, 5000);
             WindowWidth = Math.Clamp(WindowWidth, 640, 7680);
             WindowHeight = Math.Clamp(WindowHeight, 400, 4320);

@@ -164,8 +164,8 @@ namespace DRRipper
 
     public class ParallelDownloader : IDisposable
     {
-        private readonly SocketsHttpHandler _handler;
-        private readonly HttpClient _client;
+        private SocketsHttpHandler _handler;
+        private HttpClient _client;
         internal HttpClient Client => _client;
         private DownloadState _state = DownloadState.Idle;
         private readonly object _stateLock = new();
@@ -211,6 +211,13 @@ namespace DRRipper
         /// Null for manually added jobs. Transient only — never persisted.
         /// </summary>
         public Scheduler.BrowserRequestContext? RequestContext { get; set; }
+
+        /// <summary>
+        /// Adaptive per-file concurrency (Ticket #008 §6–§9). When set, the
+        /// session ramps segmented workers adaptively (up to
+        /// <c>connections</c>); otherwise the fixed count is used (Balanced).
+        /// </summary>
+        public bool AdaptiveConcurrency { get; set; }
 
         /// <summary>Fixed segment size for the dynamic chunk queue (unchanged default).</summary>
         internal const long SegmentSize = 8 * 1024 * 1024;
@@ -262,6 +269,34 @@ namespace DRRipper
                 // if DriveInfo fails (e.g., network path), allow operation to continue and let SetLength fail later
             }
         }
+
+        /// <summary>
+        /// Scheduler-path opt-in (Ticket #008 §15): use the process-wide shared
+        /// handler so connections/DNS pool across jobs. Default false (direct
+        /// unit-test constructions keep isolated stacks). The shared handler is
+        /// never disposed by this instance. Applied at set time (works with
+        /// object initializers, which run after the constructor).
+        /// </summary>
+        public bool UseSharedHandler
+        {
+            get => !_ownsHandler;
+            set
+            {
+                if (value && _ownsHandler)
+                {
+                    var shared = SharedHttpStack.Handler;
+                    try { _handler?.Dispose(); } catch { }
+                    _handler = shared;
+                    _ownsHandler = false;
+                    try { _client?.Dispose(); } catch { }
+                    _client = new HttpClient(_handler, disposeHandler: false);
+                    SharedHttpStack.ApplyDefaultHeaders(_client);
+                    _client.Timeout = Timeout.InfiniteTimeSpan;
+                }
+            }
+        }
+
+        private bool _ownsHandler = true;
 
         public ParallelDownloader()
         {
@@ -441,11 +476,15 @@ namespace DRRipper
                 try { _client?.Dispose(); } catch { }
             }
             catch { }
-            try
+            // Shared scheduler handler (§15) is process-owned: never dispose it here.
+            if (_ownsHandler)
             {
-                try { _handler?.Dispose(); } catch { }
+                try
+                {
+                    try { _handler?.Dispose(); } catch { }
+                }
+                catch { }
             }
-            catch { }
 
             GC.SuppressFinalize(this);
         }
@@ -709,6 +748,13 @@ namespace DRRipper
             string? resolvedUrl = null;
             try { resolvedUrl = headResp?.RequestMessage?.RequestUri?.ToString() ?? url; } catch { resolvedUrl = url; }
 
+            // Teardown may have disposed the client mid-probe at high worker
+            // counts (Ticket #008): the probe swallows everything by design,
+            // so re-check cancellation before building a session around a
+            // potentially dead client — OCE here means Interrupted, never a
+            // spurious Failed with ObjectDisposedException.
+            cancellationToken.ThrowIfCancellationRequested();
+
             // set initial state and status
             SetState(DownloadState.Downloading, "Starting");
 
@@ -734,6 +780,7 @@ namespace DRRipper
                 NetworkGate = NetworkGate,
                 NetworkHostKey = NetworkHostKey,
                 RequestContext = RequestContext,
+                AdaptiveConcurrency = AdaptiveConcurrency,
             };
             lock (_sessionLock)
             {
@@ -921,6 +968,21 @@ namespace DRRipper
         internal DownloadSession? ActiveSession
         {
             get { lock (_sessionLock) return _session; }
+        }
+
+        /// <summary>Adaptive concurrency snapshot (Ticket #008 §21). Never throws.</summary>
+        internal (bool Active, int Target, int Cap, double PeakMBps, string Decision, long Evals) GetAdaptiveSnapshot()
+        {
+            try
+            {
+                lock (_sessionLock)
+                {
+                    var s = _session;
+                    if (s == null) return (false, 0, 0, 0, "no-session", 0);
+                    return s.GetAdaptiveSnapshot();
+                }
+            }
+            catch { return (false, 0, 0, 0, "error", 0); }
         }
     }
 }

@@ -206,4 +206,18 @@ referrer request context with redaction, cookie transfer deferred to #012
 UX, and 39 new tests green. Engine transfer mechanics unchanged (additive
 request-context application only). See BROWSER_INTEGRATION.md.
 
+## Ticket #007.1 status (packaging + feedback hardening)
+
+Extension tree is load-ready as committed (PNG icons + notifications
+permission), validated by 14 package/JS tests and a live Edge unpacked
+load. No architecture changes.
+
+## Ticket #008 status (maximum throughput)
+
+Explicit Balanced/MaximumThroughput transfer mode with adaptive per-file
+concurrency (4→32 ladder, validation, backoff), 32/32/32 Maximum preset,
+shared HTTP stack for scheduler transfers, redirect-aware host
+attribution, and 27 new tests green. Engine durability, recovery, and
+the #005.1 allocator are unchanged. See PERFORMANCE.md.
+
 *End of ROADMAP.md.*

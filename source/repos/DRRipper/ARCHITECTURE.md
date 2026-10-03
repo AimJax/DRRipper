@@ -351,7 +351,6 @@ Presentation/lifecycle only — engine, scheduler, and store untouched.
   intact); Add dialog Enter/Escape; Desktop Behavior section with restart notes.
 
 ## 16. Post-Ticket #007 browser-integration deltas
-
 Browser handoff above the untouched scheduler trust model. Transfer,
 checkpointing, budgets, admission, and store durability are unchanged except
 additive deltas (job columns v1→v2, optional request-context plumbing).
@@ -397,6 +396,53 @@ MainWindow (bridge owner, tray/placement unchanged) ◀── DownloadScheduler
   extension-ID field, refresh/test); Details pane `SourceDisplay`
   (`Manual` vs `Chrome · host`); bridge lifecycle inside MainWindow
   composition (created after scheduler, stopped before disposal).
+
+## 17. Post-Ticket #008 maximum-throughput deltas
+
+Transfer, recovery, budgeting mechanism, and store durability unchanged;
+additive deltas only (mode enum, optional concurrency gate, schema
+untouched — still v2).
+
+```
+Settings (TransferMode + ceilings) ──▶ SchedulerSettings ──▶ ActiveJobRuntime
+  Balanced: fixed N workers/job            │  share cap = 32/active (8..32)
+  Maximum: adaptive gate + controller ─────┘  gate = central allocator (unchanged)
+                                                      ▼
+DownloadSession: fixed worker tasks × cap, dequeue gated by target;
+  MaybeAdapt() per chunk (2 s cadence, serialized) → controller → gate.
+  Probe + transfer requests carry RequestContext; effective host
+  re-attributed after redirects. Scheduler-path clients share one
+  process handler (per-job clients keep isolated defaults).
+```
+
+- **Modes (§5):** `TransferMode.Balanced` (fixed workers, 16/8 budgets —
+  bit-identical scheduling to pre-#008) vs `MaximumThroughput` (adaptive
+  gate, 32/32/32 preset applied explicitly by the UI, never silently).
+- **Controller (§6–§9):** `AdaptiveConcurrencyController` (pure): ladder
+  4→8→16→24→32, 2 s windows from verified bytes, +10% gain steps, optimistic
+  probes while per-connection health holds, two-window validation (warm-up
+  grace + dual bar: aggregate gain AND per-conn health, else revert with a
+  lengthening probe block), gradual backoff on regression/throttle/
+  fault-storm, 3-window cooldown. Evaluation serialized under a lock such
+  that worker completion bursts cannot corrupt windows or gate accounting
+  (found live during development).
+- **Gate (§19):** `SemaphoreSlim` around chunk dequeue; up releases, down
+  drains (partial drains retried next window); parked workers hold no
+  attempt slots (pause ack unaffected); disposed at run end.
+- **Share (§12/§53):** per-file ceiling divided among actual active jobs
+  at start (32/16/10/8… floor 8) so one file saturates alone while eight
+  files behave like Balanced; dominance within a share via adaptation.
+- **Teardown hardening (found by 32-conn tests):** dispose-during-probe now
+  surfaces `OperationCanceledException` (Interrupted, never spurious
+  Failed+`ObjectDisposedException`); same guard on both transfer loops.
+- **Redirects (§39):** `NoteEffectiveHost` re-attributes the budget key to
+  the effective host for all later attempts (in-flight permit kept,
+  released normally).
+- **Settings/UI (§22/§41/§51):** `TransferMode` + `MaxConnectionsPerFile`
+  persisted (old files default cleanly); Network/Performance section with
+  mode combo (Maximum applies the visible 32/32/32 preset), two ceiling
+  combos, and the bandwidth warning. Mode/ceiling apply to newly started
+  jobs live; allocator ceilings still need restart.
 
 *End of ARCHITECTURE.md.*
 

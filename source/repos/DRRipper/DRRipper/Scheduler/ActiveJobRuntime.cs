@@ -44,7 +44,7 @@ namespace DRRipper.Scheduler
         }
 
         /// <summary>Starts the download. Returns immediately; completion flows via _onTerminal.</summary>
-        public void Start(CancellationToken schedulerCt, string hostKey, BrowserRequestContext? requestContext = null)
+        public void Start(CancellationToken schedulerCt, string hostKey, BrowserRequestContext? requestContext = null, int? workerCapOverride = null)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(ActiveJobRuntime));
             if (_runTask != null) throw new InvalidOperationException("Job already started.");
@@ -59,18 +59,24 @@ namespace DRRipper.Scheduler
                 NetworkGate = _budget,
                 NetworkHostKey = hostKey,
                 RequestContext = requestContext,
+                UseSharedHandler = true,
+                AdaptiveConcurrency = _settings.TransferMode == TransferMode.MaximumThroughput,
             };
             _downloader.ProgressChanged += OnProgressChanged;
 
             var job = _job;
             var dl = _downloader;
             var cts = _jobCts;
+            int connections = Math.Clamp(
+                workerCapOverride.HasValue
+                    ? Math.Min(job.ConnectionsPerFile, workerCapOverride.Value)
+                    : job.ConnectionsPerFile, 1, 64);
             _runTask = Task.Run(async () =>
             {
                 try
                 {
                     var finalPath = await dl.StartAsync(
-                        job.OriginalUrl, job.TargetDirectory, job.ConnectionsPerFile, cts.Token);
+                        job.OriginalUrl, job.TargetDirectory, connections, cts.Token);
                     return finalPath;
                 }
                 finally
@@ -83,6 +89,29 @@ namespace DRRipper.Scheduler
         public Task<string> Completion => _runTask ?? throw new InvalidOperationException("Job not started.");
 
         public DownloadState CurrentState => _downloader?.GetState() ?? DownloadState.Idle;
+
+        /// <summary>Adaptive snapshot for telemetry/tests (§21). Never throws.</summary>
+        internal (bool Active, int Target, int Cap, double PeakMBps, string Decision, long Evals) GetAdaptiveSnapshot()
+        {
+            try { return _downloader?.GetAdaptiveSnapshot() ?? (false, 0, 0, 0, "no-downloader", 0); }
+            catch { return (false, 0, 0, 0, "error", 0); }
+        }
+
+        /// <summary>Run-state diagnostics for stuck-transfer triage. Never throws.</summary>
+        internal string GetRunDiagnostics()
+        {
+            try
+            {
+                var dl = _downloader;
+                if (dl == null) return "no-downloader";
+                var session = dl.ActiveSession;
+                if (session == null) return "no-session";
+                return $"attempts={session.ActiveAttempts} requests={session.ActiveRequests.Count} " +
+                    $"queue={session.WorkQueue.Count} phase={session.Phase} " +
+                    $"faults={Interlocked.Read(ref session.AdaptiveFaults)}";
+            }
+            catch (Exception ex) { return "diag-error:" + ex.GetType().Name; }
+        }
 
         public void Pause() => _downloader?.Pause();
 

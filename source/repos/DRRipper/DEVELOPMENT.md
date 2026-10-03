@@ -178,3 +178,20 @@ dotnet run --project source/repos/DRRipper/DRRipper.Benchmarks -c Release -- --s
 - Extension packaging (Ticket #007.1): `browser-extension/` is load-ready as
   committed (PNGs + notifications permission); `ExtensionPackageTests`
   validates manifests, assets, permissions, and JS safety properties.
+
+## 13. Throughput model (Ticket #008)
+
+- `TransferMode` (Balanced default / MaximumThroughput) + `MaxConnectionsPerFile`
+  live in `SchedulerSettings`/`AppSettings`; UI Network/Performance section
+  applies the explicit 32/32/32 Maximum preset (never silently).
+- Maximum sessions ramp a dequeue semaphore along 4→8→16→24→32
+  (`AdaptiveConcurrencyController`: gain/optimistic-probe/validation-revert/
+  throttle-backoff/hysteresis/plateau, 2 s windows, serialized evaluation).
+  Per-file share = 32/active-jobs (floor 8) at start; the central allocator,
+  budgets, and 8 MB segments are unchanged.
+- Scheduler transfers share one `SocketsHttpHandler` (per-job clients keep
+  isolated headers); direct constructions keep private stacks.
+- Effective host re-attributed after redirects; teardown races surface OCE
+  (never raw ODE); completion is atomic vs control-path Cancel/Pause.
+- Bench: `--mode`, `--latency-ms`, `--per-conn-bps`, `--global-bps`,
+  `--connect`, `--sockbuf`, `--url` (redacted). Full model: PERFORMANCE.md.

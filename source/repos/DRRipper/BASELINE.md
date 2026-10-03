@@ -496,6 +496,70 @@ allocations. No material effect (all within ±5%).
 
 ---
 
+# Ticket #008 appendix (maximum throughput, same hardware)
+
+Explicit Balanced/MaximumThroughput mode with adaptive per-file concurrency
+(4→32 ladder, validation, backoff), 32/32/32 Maximum preset, shared HTTP
+stack for scheduler transfers, redirect-aware host attribution, teardown
+race hardening. Durability, recovery, allocator, and store (still v2)
+unchanged. Full design: PERFORMANCE.md.
+
+## Build
+
+- `dotnet build DRRipper.slnx -c Release`: **0 errors**. New: `SharedHttpStack.cs`,
+  `Scheduler/ThroughputPolicy.cs`, `Scheduler/AdaptiveConcurrencyController.cs`,
+  `Benchmarks/UrlBench.cs`; extended `DownloadSession` (gate + signals +
+  redirect attribution + ODE-teardown guards), `ParallelDownloader`
+  (RequestContext passthrough already; +`AdaptiveConcurrency` + shared/opt-out
+  handler + probe-cancel check), `ActiveJobRuntime` (shared handler, mode,
+  share cap), `DownloadScheduler` (`EnqueueBrowserAsync` mode default,
+  `DefaultConnections`, `TryMarkCompletedAsync`, adaptive snapshot),
+  `JobStore` (atomic guarded completion), `AppSettings`/`SettingsViewModel`/
+  Settings dialog (Network/Performance section), `MainViewModel` (live mode
+  apply), `TestServer` (global bucket, degrade, redirect, header capture),
+  `SchedulerBench` (`--mode`, `--latency-ms`, `--per-conn-bps`,
+  `--global-bps`, `--connect`, `--sockbuf`).
+- New tests: `SchedulerPerfAdaptTests.cs` (10), `SchedulerPerfAdaptLiveTests.cs`
+  (2), `SchedulerPerfIntegrityTests.cs` (7), `SchedulerPerfBudgetTests.cs` (5),
+  `SchedulerPerfLifeTests.cs` (4).
+
+## Tests: 239 discovered (238 blocking + T-STATE-04 sensitive quarantine), 0 known-failing (209 carried + 30 new)
+
+- Two latent teardown races found by 32-conn tests and fixed: (1) dispose
+  racing request-start surfaced raw `ObjectDisposedException` instead of
+  cancellation (now OCE → Interrupted/Cancelled); (2) probe-disposed client
+  built a doomed session (now re-checks cancellation first).
+- One real completion-vs-control race fixed atomically: `TryMarkCompletedAsync`
+  (`WHERE State NOT IN (Paused, Cancelled)`) so Cancel/Pause during
+  finalization is never stomped to Completed.
+- One design bug found live: concurrent worker completion bursts corrupted
+  controller windows/gate accounting (6 evaluations in one instant);
+  `MaybeAdapt` is now serialized (all 25 perf tests green after).
+
+## Benchmarks
+
+Single-file conns ladder, 100 MB loopback (§3): 1→187.9, 2→219.9,
+4→207.5, 8→199.5, 16→191.0, 24→182.2, 32→183.2 MB/s (optimum ≈ 2;
+server/disk-bound beyond — parallelism cannot help HERE).
+Multi-file 100 MB scheduler: Balanced ≈ 190/265/270 (1/3/8 jobs);
+Maximum ≈ 175–180/221/243 (share-capped; loopback-server-bound deltas,
+see PERFORMANCE.md §8.2 for the knob-mismatch analysis).
+HTTP stack A/B (100 MB/8): custom+tuned 199.5, stock-connect 188.8,
+stock-sockbuf 191.7 — custom retained (never slower + deterministic DNS).
+Per-connection cap 2 MB/s (200–500 MB): Balanced-8 ≈ 10–16 MB/s, Maximum
+ramps to 29/32 permits (≈ +200%). Global cap 30 MB/s: 65.2 vs 65.1 —
+identical (§53). 80 ms latency sim: identical (file too small to ramp).
+Real endpoint (`speed.cloudflare.com`, global cap): Balanced-8 27.6 vs
+Maximum 29.2 (+6% within noise, cap held).
+Memory/CPU: WS flat 76 MB across 1–32 conns (pooled buffers); CPU ≈ 2 s
+per 100 MB (network-bound, not CPU-bound); reTx 0 everywhere.
+
+## CI
+
+- Ticket #008 run: recorded post-push in the final report.
+
+---
+
 # Ticket #007 appendix (browser integration, same hardware)
 
 Production browser handoff above the untouched transfer trust model

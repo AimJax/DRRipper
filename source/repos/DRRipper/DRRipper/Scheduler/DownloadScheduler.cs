@@ -200,7 +200,11 @@ namespace DRRipper.Scheduler
             return true;
         }
 
-        /// <summary>Enqueues a single URL. Never deduplicates (each submission is independent).</summary>
+        /// <summary>
+        /// Enqueues a single URL. Never deduplicates (each submission is independent).
+        /// A null <paramref name="connectionsPerFile"/> takes the mode default:
+        /// 8 in Balanced, the configured ceiling in MaximumThroughput (§23).
+        /// </summary>
         public async Task<DownloadJob> EnqueueAsync(string url, string targetDirectory, int? connectionsPerFile = null, int priority = 0, string? requestedFileName = null, CancellationToken ct = default)
         {
             ObjectDisposedException.ThrowIf(_disposed, nameof(DownloadScheduler));
@@ -227,7 +231,7 @@ namespace DRRipper.Scheduler
                 QueuePosition = pos,
                 Priority = priority,
                 State = JobState.Queued,
-                ConnectionsPerFile = Math.Clamp(connectionsPerFile ?? 8, 1, 16),
+                ConnectionsPerFile = DefaultConnections(_settings, connectionsPerFile),
                 HostKey = ConnectionBudget.NormalizeHostKey(normalized),
             };
             await _store.AddAsync(job, ct);
@@ -276,7 +280,7 @@ namespace DRRipper.Scheduler
                     QueuePosition = pos++,
                     Priority = priority,
                     State = JobState.Queued,
-                    ConnectionsPerFile = Math.Clamp(connectionsPerFile ?? 8, 1, 16),
+                    ConnectionsPerFile = DefaultConnections(_settings, connectionsPerFile),
                     HostKey = ConnectionBudget.NormalizeHostKey(normalized),
                 };
                 jobs.Add(job);
@@ -351,9 +355,50 @@ namespace DRRipper.Scheduler
         internal bool TryGetBrowserContext(Guid jobId, out BrowserRequestContext? context)
             => _browserContexts.TryGetValue(jobId, out context);
 
+        /// <summary>
+        /// Mode-aware per-file connection default (Ticket #008 §23): explicit
+        /// values are honored up to 64; null takes 8 in Balanced and the
+        /// configured ceiling in MaximumThroughput.
+        /// </summary>
+        internal static int DefaultConnections(SchedulerSettings? settings, int? requested)
+        {
+            if (requested.HasValue)
+                return Math.Clamp(requested.Value, 1, 64);
+            if (settings != null && settings.TransferMode == TransferMode.MaximumThroughput)
+                return SchedulerThroughputPolicy.EffectiveMaxPerFile(settings);
+            return SchedulerThroughputPolicy.BalancedPerFileConnections;
+        }
+
         /// <summary>Finds a job by browser handoff idempotency key (Ticket #007 §27).</summary>
         public Task<DownloadJob?> GetJobByBrowserRequestIdAsync(string? browserRequestId, CancellationToken ct = default)
             => _store.GetByBrowserRequestIdAsync(browserRequestId, ct);
+
+        /// <summary>Adaptive snapshot for one active job, if running (§21). Never throws.</summary>
+        public (bool Active, int Target, int Cap, double PeakMBps, string Decision, long Evals) TryGetAdaptiveSnapshot(Guid jobId)
+        {
+            try
+            {
+                if (_active.TryGetValue(jobId, out var rt))
+                    return rt.GetAdaptiveSnapshot();
+                return (false, 0, 0, 0, "not-active", 0);
+            }
+            catch { return (false, 0, 0, 0, "error", 0); }
+        }
+
+        /// <summary>
+        /// Run-state diagnostics for stuck-transfer triage (tests/diagnostics).
+        /// Never throws. Reports worker/attempt/queue/phase counters.
+        /// </summary>
+        internal string GetRunDiagnostics(Guid jobId)
+        {
+            try
+            {
+                if (!_active.TryGetValue(jobId, out var rt))
+                    return "no-runtime";
+                return rt.GetRunDiagnostics();
+            }
+            catch (Exception ex) { return "diag-error:" + ex.GetType().Name; }
+        }
 
         // ---------- per-job controls ----------
 
@@ -625,7 +670,19 @@ namespace DRRipper.Scheduler
                 }
             }
             catch { browserContext = null; }
-            rt.Start(_loopCts?.Token ?? CancellationToken.None, hostKey, browserContext);
+            // Maximum-mode share guard (Ticket #008 §12/§53): divide the 32-file
+            // ceiling among ACTUAL active jobs (snapshot at start) so one file
+            // saturates alone while 8 files behave like Balanced (no global
+            // over-parallelization collapse on capped paths). The shared gate
+            // still lets efficient jobs dominate within their share.
+            int? workerCap = null;
+            try
+            {
+                if (_settings.TransferMode == TransferMode.MaximumThroughput)
+                    workerCap = SchedulerThroughputPolicy.SharedWorkerCap(_active.Count);
+            }
+            catch { workerCap = null; }
+            rt.Start(_loopCts?.Token ?? CancellationToken.None, hostKey, browserContext, workerCap);
             _ = WatchJobAsync(job.JobId, rt);
         }
 
@@ -655,11 +712,15 @@ namespace DRRipper.Scheduler
 
                 if (terminalEx == null && !cancelled)
                 {
-                    // Success.
-                    await _store.UpdateStateAsync(jobId, JobState.Completed,
-                        completedBytes: job.TotalBytes > 0 ? job.TotalBytes : job.CompletedBytes,
-                        resolvedFinalPath: finalPath ?? job.ResolvedFinalPath,
-                        completedUtc: DateTimeOffset.UtcNow, ct: CancellationToken.None);
+                    // Success — unless a control path (Cancel/Pause) already owns
+                    // a terminal state (Ticket #008: atomic guard, no stomping).
+                    bool marked = await _store.TryMarkCompletedAsync(jobId,
+                        job.TotalBytes > 0 ? job.TotalBytes : job.CompletedBytes,
+                        finalPath ?? job.ResolvedFinalPath, CancellationToken.None);
+                    if (!marked)
+                    {
+                        try { job = await _store.GetAsync(jobId) ?? job; } catch { }
+                    }
                 }
                 else if (terminalEx is OperationCanceledException)
                 {

@@ -191,6 +191,18 @@ namespace DRRipper.Scheduler
     }
 
     /// <summary>
+    /// Transfer aggressiveness (Ticket #008 §5). Balanced preserves the
+    /// established fair scheduler behavior; MaximumThroughput lets a large
+    /// download consume essentially the whole connection budget with adaptive
+    /// per-file concurrency.
+    /// </summary>
+    public enum TransferMode
+    {
+        Balanced = 0,
+        MaximumThroughput = 1,
+    }
+
+    /// <summary>
     /// Scheduler configuration (persisted or configurable).
     /// </summary>
     public sealed class SchedulerSettings
@@ -206,6 +218,20 @@ namespace DRRipper.Scheduler
 
         /// <summary>Maximum scheduler-level retry attempts for a failed job.</summary>
         public int MaxJobAttempts { get; set; } = 3;
+
+        /// <summary>
+        /// Transfer aggressiveness (Ticket #008 §5). Balanced = fixed per-file
+        /// connections + fair budgets. MaximumThroughput = adaptive per-file
+        /// concurrency up to <see cref="MaxConnectionsPerFile"/> with budgets
+        /// biased toward saturating active large files.
+        /// </summary>
+        public TransferMode TransferMode { get; set; } = TransferMode.Balanced;
+
+        /// <summary>
+        /// Hard ceiling for per-file worker concurrency (Ticket #008 §22/§23).
+        /// Balanced default 8 (unchanged behavior); Maximum preset 32.
+        /// </summary>
+        public int MaxConnectionsPerFile { get; set; } = 8;
 
         /// <summary>Base delay for scheduler-level job retry with exponential backoff.</summary>
         public TimeSpan JobRetryBaseDelay { get; set; } = TimeSpan.FromSeconds(30);

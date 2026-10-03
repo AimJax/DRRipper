@@ -232,5 +232,37 @@ namespace DRRipper.Tests
             Assert.Contains("token=", job!.OriginalUrl);
             Assert.DoesNotContain(new string('a', 100), BrowserValidation.RedactUrl(job.OriginalUrl));
         }
+
+        [Fact] // T-BRIDGE-09: browser jobs use the same MaximumThroughput mode (§40).
+        public async Task T_BRIDGE_09_Browser_Uses_Maximum_Mode()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "DRRipperBridgeMax", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var targetDir = Path.Combine(dir, "dl");
+                Directory.CreateDirectory(targetDir);
+                var store = await JobStore.CreateAsync(Path.Combine(dir, "queue.db"));
+                try
+                {
+                    var settings = new SchedulerSettings();
+                    SchedulerThroughputPolicy.ApplyMaximumPreset(settings);
+                    using var scheduler = new DownloadScheduler(store, settings);
+                    using var bridge = new BrowserBridgeService(scheduler, () => targetDir,
+                        "DRRipper.TestBridgeMax." + Guid.NewGuid().ToString("N"));
+                    var response = await WithBudget(bridge.HandleEnqueueAsync(ValidRequest("max-1"), default), "enqueue");
+                    Assert.True(response.Accepted);
+                    var job = await WithBudget(store.GetAsync(Guid.Parse(response.JobId!)), "fetch");
+                    Assert.NotNull(job);
+                    // Same ceiling as manual Maximum jobs + browser metadata intact.
+                    Assert.Equal(32, job!.ConnectionsPerFile);
+                    Assert.Equal("Chrome", job.SourceApplication);
+                    Assert.Equal("example.com", job.ReferrerHost);
+                    Assert.Equal("max-1", job.BrowserRequestId);
+                }
+                finally { try { store.Dispose(); } catch { } }
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
     }
 }

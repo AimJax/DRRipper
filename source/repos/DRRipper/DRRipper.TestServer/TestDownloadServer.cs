@@ -100,6 +100,10 @@ public sealed class TestDownloadServer : IAsyncDisposable
         to.RetryAfterSeconds = from.RetryAfterSeconds;
         to.IdentitySwitchAfterRequests = from.IdentitySwitchAfterRequests;
         to.SwitchedETag = from.SwitchedETag;
+        to.GlobalBytesPerSecond = from.GlobalBytesPerSecond;
+        to.DegradeAfterConnections = from.DegradeAfterConnections;
+        to.DegradeAddedLatency = from.DegradeAddedLatency;
+        to.RedirectTarget = from.RedirectTarget;
         to.ShortBodyBytes = from.ShortBodyBytes;
         to.ConstantContent = from.ConstantContent;
         to.ConstantByte = from.ConstantByte;
@@ -134,12 +138,55 @@ public sealed class TestDownloadServer : IAsyncDisposable
 
     private long _fileRequestSequence;
 
+    // Ticket #008 §29/§30 shared shaping state (per server instance).
+    private int _concurrentResponses;
+    private readonly object _bucketLock = new();
+    private double _bucketBytes;
+    private long _bucketStampMs;
+
+    internal int ConcurrentResponses => Volatile.Read(ref _concurrentResponses);
+
     private async Task HandleFileAsync(HttpContext ctx)
     {
-        await ServeAsync(ctx, Profile, Log, Interlocked.Increment(ref _fileRequestSequence));
+        Interlocked.Increment(ref _concurrentResponses);
+        try
+        {
+            await ServeAsync(ctx, Profile, Log, Interlocked.Increment(ref _fileRequestSequence), this);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _concurrentResponses);
+        }
     }
 
-    private static async Task ServeAsync(HttpContext ctx, ServerProfile profile, Action<RequestRecord> log, long sequence = 0)
+    /// <summary>
+    /// Shared token-bucket throttle (§29): blocks until <paramref name="bytes"/>
+    /// fit the configured global rate. No-op when uncapped.
+    /// </summary>
+    internal async Task PaceGlobalAsync(long bytes, long ratePerSec, CancellationToken ct)
+    {
+        double waitMs;
+        lock (_bucketLock)
+        {
+            long now = Environment.TickCount64;
+            if (_bucketStampMs == 0) { _bucketStampMs = now; _bucketBytes = ratePerSec; }
+            double elapsedS = Math.Max(0, (now - _bucketStampMs) / 1000.0);
+            _bucketStampMs = now;
+            _bucketBytes = Math.Min(ratePerSec, _bucketBytes + elapsedS * ratePerSec);
+            if (_bucketBytes >= bytes)
+            {
+                _bucketBytes -= bytes;
+                return;
+            }
+            double deficit = bytes - _bucketBytes;
+            _bucketBytes = 0;
+            waitMs = deficit * 1000.0 / ratePerSec;
+        }
+        if (waitMs > 0)
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(waitMs, 5000)), ct);
+    }
+
+    private static async Task ServeAsync(HttpContext ctx, ServerProfile profile, Action<RequestRecord> log, long sequence = 0, TestDownloadServer? owner = null)
     {
         var isHead = HttpMethods.IsHead(ctx.Request.Method);
         var rangeHeader = ctx.Request.Headers.Range.FirstOrDefault();
@@ -149,6 +196,24 @@ public sealed class TestDownloadServer : IAsyncDisposable
 
         try
         {
+            // Redirect probe (§39): answered before any other routing.
+            if (!string.IsNullOrWhiteSpace(profile.RedirectTarget) &&
+                Uri.TryCreate(profile.RedirectTarget, UriKind.Absolute, out var target))
+            {
+                status = 302;
+                ctx.Response.StatusCode = status;
+                ctx.Response.Headers.Location = target.ToString();
+                return;
+            }
+
+            // Bad-scaling emulation (§30): over-concurrency adds latency.
+            if (owner != null && profile.DegradeAfterConnections is int degradeAt &&
+                profile.DegradeAddedLatency is { } degradeBy &&
+                owner.ConcurrentResponses > degradeAt)
+            {
+                try { await Task.Delay(degradeBy, ctx.RequestAborted); } catch { return; }
+            }
+
             if (profile.GlobalStatus is int global)
             {
                 status = global;
@@ -260,6 +325,10 @@ public sealed class TestDownloadServer : IAsyncDisposable
                         await sink.FlushAsync(ctx.RequestAborted);
                         offset += n;
                         bytesWritten += n;
+                        if (owner != null && profile.GlobalBytesPerSecond is long globalRate && globalRate > 0)
+                        {
+                            try { await owner.PaceGlobalAsync(n, globalRate, ctx.RequestAborted); } catch { }
+                        }
                         if (throttle != long.MaxValue)
                         {
                             double msOwed = n * 1000.0 / throttle;

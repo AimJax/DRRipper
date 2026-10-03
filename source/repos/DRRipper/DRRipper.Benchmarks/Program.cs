@@ -30,6 +30,12 @@ public static class Program
         {
             return await SchedulerBench.RunAsync(args);
         }
+        string? url = GetArgOrNull(args, "--url");
+        if (url != null)
+        {
+            return await UrlBench.RunAsync(args);
+        }
+        SchedulerBench.ApplyStackKnobs(args);
 
         var sizesMb = GetArg(args, "--sizes-mb", "10,100,1024").Split(',').Select(long.Parse).ToArray();
         var conns = GetArg(args, "--conns", "1,2,4,8,16").Split(',').Select(int.Parse).ToArray();

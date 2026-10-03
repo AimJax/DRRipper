@@ -277,6 +277,29 @@ namespace DRRipper
         /// manually added jobs. Transient only — never persisted.
         /// </summary>
         public DRRipper.Scheduler.BrowserRequestContext? RequestContext;
+        /// <summary>
+        /// Adaptive per-file concurrency (Ticket #008 §6–§9). When true, the
+        /// segmented run ramps workers along the policy ladder instead of the
+        /// fixed <see cref="Connections"/> count. Balanced runs leave it false.
+        /// </summary>
+        public bool AdaptiveConcurrency;
+        /// <summary>Retryable-fault observations for the adaptation controller (§7).</summary>
+        public long AdaptiveFaults;
+        /// <summary>Explicit throttle observations 429/503/Retry-After (§9/§31).</summary>
+        public long AdaptiveThrottles;
+
+        // Adaptive run state (Ticket #008 §6–§9, segmented runs only).
+        internal DRRipper.Scheduler.AdaptiveConcurrencyController? _adaptive;
+        private SemaphoreSlim? _concurrencyGate;
+        private int _gateCount;
+        private int _adaptiveCap;
+        private readonly object _adaptLock = new();
+        private long _adaptLastBytes;
+        private DateTime _adaptLastTime = DateTime.MinValue;
+        private long _adaptLastFaults;
+        private long _adaptLastThrottles;
+        /// <summary>MaybeAdapt evaluations that passed the time gate (telemetry).</summary>
+        public long AdaptEvaluations;
 
         public DownloadSession(ParallelDownloader owner, HttpClient client)
         {
@@ -1183,59 +1206,242 @@ namespace DRRipper
 
         // ---------- segmented run (Ticket #003 gate preserved, session-owned) ----------
 
+        /// <summary>
+        /// Records explicit throttle signals for adaptation (§9/§31): 429/503
+        /// or any Retry-After directive counts as backoff pressure; other
+        /// retryable statuses count as ordinary faults. Never throws.
+        /// </summary>
+        internal void NoteThrottleSignal(int statusCode, TimeSpan? retryAfter)
+        {
+            try
+            {
+                if (statusCode == 429 || statusCode == 503 || retryAfter != null)
+                    Interlocked.Increment(ref AdaptiveThrottles);
+                else
+                    Interlocked.Increment(ref AdaptiveFaults);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Redirect-aware host attribution (Ticket #008 §39): when the server
+        /// redirects to a different host, future attempts are budgeted against
+        /// the EFFECTIVE host instead of the submitted origin. The in-flight
+        /// attempt keeps its already-granted permit (bounded single-request
+        /// leak, released normally). Never throws.
+        /// </summary>
+        internal void NoteEffectiveHost(HttpResponseMessage resp)
+        {
+            try
+            {
+                var uri = resp?.RequestMessage?.RequestUri;
+                if (uri == null)
+                    return;
+                var effective = Scheduler.ConnectionBudget.NormalizeHostKey(uri.ToString());
+                if (string.IsNullOrEmpty(effective))
+                    return;
+                if (!string.Equals(effective, NetworkHostKey, StringComparison.OrdinalIgnoreCase))
+                    NetworkHostKey = effective;
+            }
+            catch { }
+        }
+
+        /// <summary>Telemetry snapshot for adaptation (§21). Never throws.</summary>
+        public (bool Active, int Target, int Cap, double PeakMBps, string Decision, long Evals) GetAdaptiveSnapshot()
+        {
+            try
+            {
+                var ctl = _adaptive;
+                if (ctl == null)
+                    return (false, Connections, Connections, 0, "off", 0);
+                return (true, ctl.Target, _adaptiveCap, ctl.PeakMBps, ctl.LastDecision,
+                    Interlocked.Read(ref AdaptEvaluations));
+            }
+            catch { return (false, Connections, Connections, 0, "error", 0); }
+        }
+
+        /// <summary>
+        /// One adaptation step, throttled to the controller window (§7).
+        /// Called after successful chunks; sampling uses verified-downloaded
+        /// bytes so unfinished work never inflates the signal.
+        /// </summary>
+        internal void MaybeAdapt()
+        {
+            var ctl = _adaptive;
+            var gate = _concurrencyGate;
+            if (ctl == null || gate == null)
+                return;
+            // Serialized (Ticket #008): worker completion bursts would otherwise
+            // evaluate concurrently, corrupting window deltas, streaks, and gate
+            // accounting. Held briefly once per chunk; never on the hot path.
+            lock (_adaptLock)
+            {
+                try
+                {
+                    var now = DateTime.UtcNow;
+                    if (_adaptLastTime != DateTime.MinValue &&
+                        (now - _adaptLastTime) < DRRipper.Scheduler.AdaptiveConcurrencyController.MinWindow)
+                        return;
+                    Interlocked.Increment(ref AdaptEvaluations);
+                double seconds = _adaptLastTime == DateTime.MinValue
+                    ? DRRipper.Scheduler.AdaptiveConcurrencyController.MinWindow.TotalSeconds
+                    : Math.Max(1.0, (now - _adaptLastTime).TotalSeconds);
+                long bytesNow = Owner.ReadDownloaded();
+                long faultsNow = Interlocked.Read(ref AdaptiveFaults);
+                long throttlesNow = Interlocked.Read(ref AdaptiveThrottles);
+                double mbps = (bytesNow - _adaptLastBytes) / 1048576.0 / seconds;
+                int target = ctl.Observe(mbps,
+                    (int)Math.Min(int.MaxValue, Math.Max(0, faultsNow - _adaptLastFaults)),
+                    (int)Math.Min(int.MaxValue, Math.Max(0, throttlesNow - _adaptLastThrottles)));
+                _adaptLastBytes = bytesNow;
+                _adaptLastTime = now;
+                _adaptLastFaults = faultsNow;
+                _adaptLastThrottles = throttlesNow;
+                ApplyTarget(gate, target);
+                }
+                catch { }
+            }
+        }
+
+        private void ApplyTarget(SemaphoreSlim gate, int target)
+        {
+            try
+            {
+                target = Math.Clamp(target, 1, 64);
+                while (_gateCount < target && _gateCount < 64)
+                {
+                    gate.Release();
+                    _gateCount++;
+                }
+                while (_gateCount > target)
+                {
+                    if (!gate.Wait(TimeSpan.Zero))
+                        break; // workers hold the rest; retry next window
+                    _gateCount--;
+                }
+            }
+            catch { }
+        }
+
         public async Task<string> RunSegmentedAsync()
         {
             if (Tracker == null) Tracker = new RangeTracker(TotalSize);
+            // Adaptive gate (§6–§9): workers beyond the current target park on
+            // the semaphore instead of exiting, so ramp-up needs no task churn
+            // and ramp-down needs no worker teardown. Balanced runs skip it.
+            SemaphoreSlim? gate = null;
+            int workers = Connections;
+            if (AdaptiveConcurrency)
+            {
+                try
+                {
+                    _adaptiveCap = Math.Clamp(Connections, 1, 64);
+                    int initial = Scheduler.SchedulerThroughputPolicy.InitialConcurrency(TotalSize, _adaptiveCap);
+                    _adaptive = new Scheduler.AdaptiveConcurrencyController(initial, _adaptiveCap);
+                    _concurrencyGate = gate = new SemaphoreSlim(initial, 64);
+                    _gateCount = initial;
+                    _adaptLastBytes = Owner.ReadDownloaded();
+                    _adaptLastTime = DateTime.UtcNow;
+                    _adaptLastFaults = Interlocked.Read(ref AdaptiveFaults);
+                    _adaptLastThrottles = Interlocked.Read(ref AdaptiveThrottles);
+                    // Live workers can never usefully exceed the segment count
+                    // (single-owner chunks); spawning beyond it only parks
+                    // tasks. The gate still governs the adaptive target.
+                    workers = Math.Min(_adaptiveCap, Math.Max(initial, WorkQueue.Count));
+                }
+                catch { _adaptive = null; _concurrencyGate = null; gate = null; workers = Connections; }
+            }
             var tasks = new List<Task>();
-            for (int i = 0; i < Connections; i++)
+            for (int i = 0; i < workers; i++)
             {
                 tasks.Add(Task.Run(async () =>
                 {
-                    while (!SessionCt.IsCancellationRequested)
+                    bool holdsGate = false;
+                    try
                     {
-                        // The pause TOKEN is the single source of parking truth
-                        // (never spin on phase: a flapped phase + set token would
-                        // busy-loop). Terminal exits; drops re-dequeue after resume.
-                        PauseToken.WaitIfPaused(SessionCt);
-                        lock (_phaseLock)
+                        while (!SessionCt.IsCancellationRequested)
                         {
-                            if (Phase == SessionPhase.Terminal) break;
-                        }
-                        if (!WorkQueue.TryDequeue(out var chunk)) break;
-                        long gen = PauseGeneration;
-                        try { ActiveRemainders[chunk.Start] = chunk.End; } catch { }
-                        // NOTE: no attempt count here — attempt slots are counted
-                        // per-iteration inside DownloadChunkAsync, so parked
-                        // workers never stall Pause() acknowledgement.
-                        try
-                        {
-                            bool done = await DownloadChunkAsync(chunk, gen);
-                            if (!done)
+                            // The pause TOKEN is the single source of parking truth
+                            // (never spin on phase: a flapped phase + set token would
+                            // busy-loop). Terminal exits; drops re-dequeue after resume.
+                            PauseToken.WaitIfPaused(SessionCt);
+                            lock (_phaseLock)
                             {
-                                // Paused-drop (self-requeued): park until resume,
-                                // then dequeue again (never exit: exiting would
-                                // drain the worker pool mid-run).
-                                PauseToken.WaitIfPaused(SessionCt);
-                                continue;
+                                if (Phase == SessionPhase.Terminal) break;
+                            }
+                            if (gate != null)
+                            {
+                                try { await gate.WaitAsync(SessionCt); }
+                                catch (OperationCanceledException) { break; }
+                                holdsGate = true;
+                            }
+                            if (!WorkQueue.TryDequeue(out var chunk))
+                            {
+                                break; // queue drained: release below, then exit
+                            }
+                            long gen = PauseGeneration;
+                            try { ActiveRemainders[chunk.Start] = chunk.End; } catch { }
+                            // NOTE: no attempt count here — attempt slots are counted
+                            // per-iteration inside DownloadChunkAsync, so parked
+                            // workers never stall Pause() acknowledgement.
+                            try
+                            {
+                                bool done = await DownloadChunkAsync(chunk, gen);
+                                if (done)
+                                {
+                                    try { MaybeAdapt(); } catch { }
+                                }
+                                if (!done)
+                                {
+                                    // Paused-drop (self-requeued): park until resume,
+                                    // then dequeue again (never exit: exiting would
+                                    // drain the worker pool mid-run).
+                                    PauseToken.WaitIfPaused(SessionCt);
+                                    continue;
+                                }
+                            }
+                            catch (OperationCanceledException) { break; }
+                            catch (RangeNotSupportedException)
+                            {
+                                RequestFallbackSingleStream();
+                                break;
+                            }
+                            catch (Exception ex)
+                            {
+                                RecordFault(ex is DownloadFailedException dfe ? dfe :
+                                    new DownloadFailedException($"Segment [{chunk.Start}-{chunk.End}] failed: {ex.Message}", ex));
+                                break;
+                            }
+                            finally
+                            {
+                                if (holdsGate)
+                                {
+                                    try { gate!.Release(); } catch { }
+                                    holdsGate = false;
+                                }
                             }
                         }
-                        catch (OperationCanceledException) { break; }
-                        catch (RangeNotSupportedException)
+                    }
+                    finally
+                    {
+                        if (holdsGate)
                         {
-                            RequestFallbackSingleStream();
-                            break;
-                        }
-                        catch (Exception ex)
-                        {
-                            RecordFault(ex is DownloadFailedException dfe ? dfe :
-                                new DownloadFailedException($"Segment [{chunk.Start}-{chunk.End}] failed: {ex.Message}", ex));
-                            break;
+                            try { gate!.Release(); } catch { }
+                            holdsGate = false;
                         }
                     }
                 }, SessionCt));
             }
 
-            await Task.WhenAll(tasks);
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            finally
+            {
+                try { gate?.Dispose(); } catch { }
+                if (ReferenceEquals(_concurrencyGate, gate)) _concurrencyGate = null;
+            }
 
             // Run-end reconciliation runs under the pause semaphore so pause,
             // resume, gate and finalize are mutually exclusive: no transition
@@ -1441,6 +1647,7 @@ namespace DRRipper
                         using var resp = await Client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, perReq.Token);
 
                         int code = (int)resp.StatusCode;
+                        NoteEffectiveHost(resp);
                         if (resp.StatusCode == HttpStatusCode.OK)
                             throw new RangeNotSupportedException($"Server answered 200 to range [{reqStart}-{reqEnd}]; ranges unsupported.");
                         if (resp.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable ||
@@ -1456,10 +1663,14 @@ namespace DRRipper
                         if (Policy != null && IsRetryableStatus(code))
                         {
                             attemptRetryAfter = ParallelDownloader.GetRetryAfterDelay(resp);
+                            NoteThrottleSignal(code, attemptRetryAfter);
                             throw new HttpRequestException($"HTTP {code} ({resp.StatusCode}) for range [{reqStart}-{reqEnd}].");
                         }
                         if (code >= 400 && code < 500)
+                        {
+                            try { Interlocked.Increment(ref AdaptiveFaults); } catch { }
                             throw new NonRetryableHttpException($"HTTP {code} ({resp.StatusCode}) for range [{reqStart}-{reqEnd}].");
+                        }
 
                         ParallelDownloader.ValidateRangeResponse(resp, reqStart, reqEnd, TotalSize, ETag, LastModified);
 
@@ -1532,8 +1743,18 @@ namespace DRRipper
                         if (DropWithRequeue(origStart, reqStart, reqStart + writtenThisAttempt)) return true;
                         return false; // paused-drop (or teardown), self-requeued above
                     }
+                    catch (ObjectDisposedException) when (SessionCt.IsCancellationRequested)
+                    {
+                        // Teardown/dispose raced a request start at high worker
+                        // counts (Ticket #008): the client/handle went away under
+                        // teardown. This is cancellation, not corruption — let
+                        // the OCE path decide Interrupted vs Cancelled.
+                        await SettleReadAsync(null);
+                        throw new OperationCanceledException(SessionCt);
+                    }
                     catch (Exception ex) when (ParallelDownloader.IsTransientNetworkError(ex))
                     {
+                        try { Interlocked.Increment(ref AdaptiveFaults); } catch { }
                         if (writtenThisAttempt > 0)
                         {
                             long newStart = chunk.Start + writtenThisAttempt;
@@ -1631,6 +1852,7 @@ namespace DRRipper
 
                         using var resp = await Client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, perReq.Token);
                         int sc = (int)resp.StatusCode;
+                        NoteEffectiveHost(resp);
 
                         if (PrefixOffset > 0 && (resp.StatusCode == HttpStatusCode.OK ||
                             resp.StatusCode == HttpStatusCode.PreconditionFailed ||
@@ -1647,10 +1869,14 @@ namespace DRRipper
                         if (Policy != null && IsRetryableStatus(sc))
                         {
                             attemptRetryAfter = ParallelDownloader.GetRetryAfterDelay(resp);
+                            NoteThrottleSignal(sc, attemptRetryAfter);
                             throw new HttpRequestException($"HTTP {sc} ({resp.StatusCode}) for prefix download.");
                         }
                         if (sc >= 400 && sc < 500)
+                        {
+                            try { Interlocked.Increment(ref AdaptiveFaults); } catch { }
                             throw new NonRetryableHttpException($"HTTP {sc} ({resp.StatusCode}) for prefix download.");
+                        }
                         resp.EnsureSuccessStatusCode();
 
                         long? reported = resp.Content.Headers.ContentRange?.Length ?? resp.Content.Headers.ContentLength;
@@ -1724,8 +1950,14 @@ namespace DRRipper
                         // loop top parks with nothing held after continue.
                         continue; // paused: loop re-requests from PrefixOffset
                     }
+                    catch (ObjectDisposedException) when (SessionCt.IsCancellationRequested)
+                    {
+                        // Same teardown race as the segmented path (Ticket #008).
+                        throw new OperationCanceledException(SessionCt);
+                    }
                     catch (Exception ex) when (ParallelDownloader.IsTransientNetworkError(ex))
                     {
+                        try { Interlocked.Increment(ref AdaptiveFaults); } catch { }
                         if (writtenThisAttempt > 0)
                         {
                             consecutiveFailures = 0;

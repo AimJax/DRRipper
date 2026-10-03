@@ -147,6 +147,68 @@ namespace DRRipper.Views
                 vm.CloseBehavior = (UI.CloseButtonBehavior)box.SelectedIndex;
         }
 
+        private void TransferBox_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.ComboBox box && Vm is { } vm)
+            {
+                _syncing = true;
+                try { box.SelectedIndex = vm.TransferMode == Scheduler.TransferMode.MaximumThroughput ? 1 : 0; }
+                finally { _syncing = false; }
+            }
+        }
+
+        private void TransferBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_syncing || Vm is not { } vm) return;
+            if (sender is System.Windows.Controls.ComboBox box && box.SelectedIndex >= 0)
+            {
+                if (box.SelectedIndex == 1)
+                    vm.ApplyMaximumPreset(); // explicit preset: 32/32/32, never silent (§52)
+                else
+                    vm.TransferMode = Scheduler.TransferMode.Balanced;
+                try { SyncBudgetBoxes(); } catch { }
+            }
+        }
+
+        private void SyncBudgetBoxes()
+        {
+            // Reflect a preset back into the visible budget combos.
+            if (Vm is not { } vm) return;
+            _syncing = true;
+            try
+            {
+                if (GlobalBox != null) SelectValue(GlobalBox, vm.GlobalConnectionBudget);
+                if (HostBox != null) SelectValue(HostBox, vm.PerHostConnectionBudget);
+                if (MaxConnsBox != null) SelectValue(MaxConnsBox, vm.MaxConnectionsPerFile);
+                if (CeilingBox != null) SelectValue(CeilingBox, vm.GlobalConnectionBudget);
+            }
+            finally { _syncing = false; }
+        }
+
+        private void MaxConnsBox_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.ComboBox box && Vm is { } vm)
+            { _syncing = true; try { SelectValue(box, vm.MaxConnectionsPerFile); } finally { _syncing = false; } }
+        }
+
+        private void MaxConnsBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_syncing || Vm is not { } vm) return;
+            if (sender is System.Windows.Controls.ComboBox box) vm.MaxConnectionsPerFile = ReadValue(box, vm.MaxConnectionsPerFile);
+        }
+
+        private void CeilingBox_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.ComboBox box && Vm is { } vm)
+            { _syncing = true; try { SelectValue(box, vm.GlobalConnectionBudget); } finally { _syncing = false; } }
+        }
+
+        private void CeilingBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_syncing || Vm is not { } vm) return;
+            if (sender is System.Windows.Controls.ComboBox box) vm.GlobalConnectionBudget = ReadValue(box, vm.GlobalConnectionBudget);
+        }
+
         private BrowserIntegrationViewModel? BrowserVm => BrowserPanel.DataContext as BrowserIntegrationViewModel;
 
         private void BrowserPanel_Loaded(object sender, RoutedEventArgs e)

@@ -30,14 +30,22 @@ public static class SchedulerBench
         int conns = int.Parse(GetArg(args, "--conns", "4"));
         int iters = int.Parse(GetArg(args, "--iters", "3"));
         string? outPath = GetArgOrNull(args, "--out");
+        // Ticket #008 §5: --mode balanced|maximum (default balanced).
+        var mode = GetArg(args, "--mode", "balanced");
+        // Ticket #008 §27/§28/§29: server shaping for scaling proofs.
+        long latencyMs = long.Parse(GetArg(args, "--latency-ms", "0"));
+        long perConnBps = long.Parse(GetArg(args, "--per-conn-bps", "0"));
+        long globalBps = long.Parse(GetArg(args, "--global-bps", "0"));
+        // Ticket #008 §15/§17/§18 experiment knobs (also honored by direct mode).
+        ApplyStackKnobs(args);
 
-        Console.WriteLine($"SchedulerBench: size={sizeMb}MB/file conns={conns} jobs=[{string.Join(',', jobsList)}] iters={iters}");
+        Console.WriteLine($"SchedulerBench: size={sizeMb}MB/file conns={conns} jobs=[{string.Join(',', jobsList)}] iters={iters} mode={mode}");
         var results = new List<SchedResult>();
         foreach (var jobs in jobsList)
         {
             for (int i = 1; i <= iters; i++)
             {
-                var r = await RunOnce(sizeMb * 1024 * 1024, conns, jobs, i);
+                var r = await RunOnce(sizeMb * 1024 * 1024, conns, jobs, i, mode, latencyMs, perConnBps, globalBps);
                 results.Add(r);
                 Console.WriteLine($"  jobs={jobs,2} iter={i}: agg={r.AggMBps,7:F1} MB/s  " +
                     $"per-file={r.PerFileMBps,7:F1}  cpu={r.CpuSeconds,5:F1}s  ws={r.WsMB,5}MB  " +
@@ -79,9 +87,13 @@ public static class SchedulerBench
         return results.Any(r => !r.AllOk) ? 2 : 0;
     }
 
-    private static async Task<SchedResult> RunOnce(long sizeBytes, int conns, int jobs, int iter)
+    private static async Task<SchedResult> RunOnce(long sizeBytes, int conns, int jobs, int iter, string mode, long latencyMs, long perConnBps, long globalBps)
     {
-        await using var server = await TestDownloadServer.StartAsync(new ServerProfile { FileSize = sizeBytes });
+        var profile = new ServerProfile { FileSize = sizeBytes };
+        if (latencyMs > 0) profile.InitialLatency = TimeSpan.FromMilliseconds(latencyMs);
+        if (perConnBps > 0) profile.BytesPerSecond = perConnBps;
+        if (globalBps > 0) profile.GlobalBytesPerSecond = globalBps;
+        await using var server = await TestDownloadServer.StartAsync(profile);
         string dir = Path.Combine(Path.GetTempPath(), "DRRipperSchedBench", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         string dl = Path.Combine(dir, "dl");
@@ -94,16 +106,24 @@ public static class SchedulerBench
 
         var store = await JobStore.CreateAsync(db);
         long writes0 = store.WriteCount;
-        using var sched = new DownloadScheduler(store, new SchedulerSettings
+        var settings = new SchedulerSettings
         {
             ActiveDownloadLimit = jobs,
             GlobalConnectionBudget = 16,
             PerHostConnectionBudget = 8,
-        });
+        };
+        int perFile = conns;
+        if (string.Equals(mode, "maximum", StringComparison.OrdinalIgnoreCase))
+        {
+            SchedulerThroughputPolicy.ApplyMaximumPreset(settings);
+            settings.ActiveDownloadLimit = jobs;
+            perFile = SchedulerThroughputPolicy.EffectiveMaxPerFile(settings);
+        }
+        using var sched = new DownloadScheduler(store, settings);
         await sched.StartAsync();
         var swAdmit = Stopwatch.StartNew();
         for (int j = 0; j < jobs; j++)
-            await sched.EnqueueAsync(server.FileUrl() + $"?bench={iter}-{j}", dl, connectionsPerFile: conns);
+            await sched.EnqueueAsync(server.FileUrl() + $"?bench={iter}-{j}", dl, connectionsPerFile: perFile);
         // Admission latency: enqueue -> first job Downloading.
         double admitMs = -1;
         {
@@ -196,5 +216,22 @@ public static class SchedulerBench
         for (int i = 0; i + 1 < args.Length; i++)
             if (args[i] == name) return args[i + 1];
         return null;
+    }
+
+    /// <summary>
+    /// Ticket #008 §15/§17/§18 HTTP-stack experiment knobs. All optional with
+    /// current-behavior defaults: --connect custom|stock, --sockbuf tuned|stock.
+    /// Must be applied before any downloader/scheduler is constructed.
+    /// </summary>
+    internal static void ApplyStackKnobs(string[] args)
+    {
+        var connect = GetArgOrNull(args, "--connect");
+        if (string.Equals(connect, "stock", StringComparison.OrdinalIgnoreCase))
+            DRRipper.SharedHttpStack.UseCustomConnectCallback = false;
+        var sockbuf = GetArgOrNull(args, "--sockbuf");
+        if (string.Equals(sockbuf, "stock", StringComparison.OrdinalIgnoreCase))
+            DRRipper.SharedHttpStack.SocketBufferScale = 0;
+        Console.WriteLine($"HttpStack: connect={(DRRipper.SharedHttpStack.UseCustomConnectCallback ? "custom" : "stock")}, " +
+            $"sockbuf={(DRRipper.SharedHttpStack.SocketBufferScale > 0 ? "tuned" : "stock")}.");
     }
 }

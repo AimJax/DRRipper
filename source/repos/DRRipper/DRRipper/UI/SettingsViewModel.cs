@@ -18,6 +18,8 @@ namespace DRRipper.UI
         private bool _rememberWindowPlacement;
         private CloseButtonBehavior _closeBehavior;
         private bool _minimizeToTray;
+        private Scheduler.TransferMode _transferMode;
+        private int _maxConnectionsPerFile;
 
         public SettingsViewModel(AppSettings current)
         {
@@ -31,6 +33,8 @@ namespace DRRipper.UI
             _rememberWindowPlacement = current.RememberWindowPlacement;
             _closeBehavior = current.CloseBehavior;
             _minimizeToTray = current.MinimizeToTray;
+            _transferMode = current.TransferMode;
+            _maxConnectionsPerFile = current.MaxConnectionsPerFile;
         }
 
         public int ActiveDownloadLimit { get => _activeDownloadLimit; set => Set(ref _activeDownloadLimit, value); }
@@ -42,6 +46,20 @@ namespace DRRipper.UI
         public bool RememberWindowPlacement { get => _rememberWindowPlacement; set => Set(ref _rememberWindowPlacement, value); }
         public CloseButtonBehavior CloseBehavior { get => _closeBehavior; set => Set(ref _closeBehavior, value); }
         public bool MinimizeToTray { get => _minimizeToTray; set => Set(ref _minimizeToTray, value); }
+        public Scheduler.TransferMode TransferMode { get => _transferMode; set => Set(ref _transferMode, value); }
+        public int MaxConnectionsPerFile { get => _maxConnectionsPerFile; set => Set(ref _maxConnectionsPerFile, value); }
+
+        /// <summary>
+        /// Applies the explicit Maximum preset (§23): mode + 32/32/32 ceilings.
+        /// Called only from the mode selector — never silently (§52).
+        /// </summary>
+        public void ApplyMaximumPreset()
+        {
+            TransferMode = Scheduler.TransferMode.MaximumThroughput;
+            GlobalConnectionBudget = Scheduler.SchedulerThroughputPolicy.MaximumGlobalBudget;
+            PerHostConnectionBudget = Scheduler.SchedulerThroughputPolicy.MaximumPerHostBudget;
+            MaxConnectionsPerFile = Scheduler.SchedulerThroughputPolicy.MaximumPerFileConnections;
+        }
 
         /// <summary>True when a budgeted value differs (restart to take effect).</summary>
         public bool BudgetsChanged(AppSettings original)
@@ -65,6 +83,9 @@ namespace DRRipper.UI
                 CloseBehavior = Enum.IsDefined(typeof(CloseButtonBehavior), _closeBehavior)
                     ? _closeBehavior : CloseButtonBehavior.MinimizeToTray,
                 MinimizeToTray = _minimizeToTray,
+                TransferMode = Enum.IsDefined(typeof(Scheduler.TransferMode), _transferMode)
+                    ? _transferMode : Scheduler.TransferMode.Balanced,
+                MaxConnectionsPerFile = _maxConnectionsPerFile,
             };
             s.Normalize();
             // Reflect normalization back so the dialog shows effective values.

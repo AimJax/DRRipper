@@ -70,6 +70,8 @@ namespace DRRipper
                     ActiveDownloadLimit = _settings.ActiveDownloadLimit,
                     GlobalConnectionBudget = _settings.GlobalConnectionBudget,
                     PerHostConnectionBudget = _settings.PerHostConnectionBudget,
+                    TransferMode = _settings.TransferMode,
+                    MaxConnectionsPerFile = _settings.MaxConnectionsPerFile,
                 });
                 var vm = new MainViewModel(
                     _scheduler,

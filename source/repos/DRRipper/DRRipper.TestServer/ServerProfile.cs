@@ -84,5 +84,24 @@ public sealed class ServerProfile
     public int? IdentitySwitchAfterRequests { get; set; }
     public string? SwitchedETag { get; set; }
 
+    /// <summary>
+    /// Shared per-client total cap (Ticket #008 §29): all concurrent responses
+    /// share this byte rate via a token bucket. Null = uncapped.
+    /// </summary>
+    public long? GlobalBytesPerSecond { get; set; }
+
+    /// <summary>
+    /// Bad-scaling emulation (Ticket #008 §30): when concurrent /file responses
+    /// exceed this count, each response sleeps DegradeAddedLatency first.
+    /// </summary>
+    public int? DegradeAfterConnections { get; set; }
+    public TimeSpan? DegradeAddedLatency { get; set; }
+
+    /// <summary>
+    /// Redirect probe (Ticket #008 §39): /file requests answer 302 to this
+    /// absolute URL (use a second server's URL for cross-host tests).
+    /// </summary>
+    public string? RedirectTarget { get; set; }
+
     public static ServerProfile Default() => new();
 }

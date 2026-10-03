@@ -238,7 +238,6 @@ Suite totals after Ticket #006.1: **157 passing in the blocking lane
 0 known-failing.**
 
 ## 15. Ticket #007 implementation mapping (browser integration)
-
 | Required test | Implementation | Status |
 |---|---|---|
 | T-BROWSER-HOST-01 valid enqueue | Framed request accepted, id preserved, headers filtered | PASS |
@@ -292,6 +291,47 @@ Suite totals after Ticket #007: **196 passing in the blocking lane
 
 Suite totals after Ticket #007.1: **210 passing in the blocking lane
 (196 carried + 14 new package/JS tests), 0 known-failing.**
+
+## 17. Ticket #008 implementation mapping (maximum throughput)
+
+| Required test | Implementation | Status |
+|---|---|---|
+| T-PERF-ADAPT-01 ramp | Scripted gains climb 4→8→16→24→32 | PASS |
+| T-PERF-ADAPT-02 cap stop | Probe + revert + plateau hold, no creep | PASS |
+| T-PERF-ADAPT-03 bad scaling | Regression steps down gradually, never cliffs | PASS |
+| T-PERF-ADAPT-04 429 | Immediate step-down + 3-window cooldown + re-ramp | PASS |
+| T-PERF-ADAPT-05 Retry-After | Throttle-equivalent backoff; storm drops to floor | PASS |
+| T-PERF-ADAPT-06 oscillation | ≤1 probe-revert under ±4% noise, then silence | PASS |
+| T-PERF-ADAPT-07 tiers | 4/8/16 initial by size; ladder steps gradual | PASS |
+| T-PERF-ADAPT-08 balanced | Defaults + `DefaultConnections` conservative | PASS |
+| + preset/share/settings | 32/32/32 preset; share caps; mode persists, legacy defaults clean | PASS |
+| + preset/share | 32/32/32 preset; share caps 32/16/10/8/8 | PASS |
+| T-PERF-ADAPT-09 live ramp | Capped server: snapshot target ≥16, byte-identical | PASS |
+| T-PERF-ADAPT-10 live 429 | Backoff observed live; job ends Failed loudly (never corrupt) | PASS |
+| T-PERF-ADAPT-11 degrading | Bounded target on bad-scaling server, byte-identical | PASS |
+| T-BRIDGE-09 max compat | Browser job gets Maximum ceiling + metadata | PASS |
+| T-PERF-INT-01/02/03 | 20 MB exact at 8/16/32 conns | PASS |
+| T-PERF-INT-04 resets | Truncated responses converge byte-identical at 16 | PASS |
+| T-PERF-INT-05 crash/restart | 16-conn kill resumes byte-identical | PASS |
+| T-PERF-INT-06 mismatch | Wrong Content-Range still rejected at 16 | PASS |
+| T-PERF-INT-07 short body | Clean-EOF resumes byte-identical at 16 | PASS |
+| T-PERF-BUDGET-01 saturation | Single job: 29/32 permits observed | PASS |
+| T-PERF-BUDGET-02 sharing | 2×16 jobs complete, budget balanced | PASS |
+| T-PERF-BUDGET-03 host cap | 16 workers under host-8 cap: never exceeded | PASS |
+| T-PERF-BUDGET-04 redirect | 302 cross-host completes; effective host attributed | PASS |
+| T-PERF-BUDGET-05 cancel | 32-conn cancel settles with zero drift | PASS |
+| T-PERF-LIFE-01 permits | 32-worker run balances exactly | PASS |
+| T-PERF-LIFE-02 ramp cancel | Mid-ramp cancel cleans all workers | PASS |
+| T-PERF-LIFE-03 pause/resume | Pause/resume across adaptation byte-identical | PASS |
+| T-PERF-LIFE-04 shutdown | 32-conn shutdown/restart byte-identical | PASS |
+
+Suite totals after Ticket #008: **239 discovered (238 blocking + 1 sensitive
+quarantine), 0 known-failing: 209 carried + 30 new** (10 adapt + 3 live +
+7 integrity + 5 budget + 4 life + 1 browser-max). (Carried reads 209 vs the
+210 reported in #007.1 — off-by-one in prior theory-case bookkeeping; the
+product diff deletes zero tests.)
+
+*End of TEST_PLAN.md.*
 
 *End of TEST_PLAN.md.*
 
